@@ -1,0 +1,13 @@
+[package]
+name = "samosd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+samos-core = { version = "0.1.0", path = "../samos-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sysinfo = "0.39.6"
+tokio = { version = "1.53.1", features = ["full"] }

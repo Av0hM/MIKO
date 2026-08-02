@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+"crates/samosd",
+"crates/samosctl",
+"crates/samos-core",
+"crates/samos-ipc",
+"crates/samos-theme",
+"crates/samos-modules"
+]

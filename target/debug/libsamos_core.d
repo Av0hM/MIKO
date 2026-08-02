@@ -1,0 +1,1 @@
+/home/sammo/Projects/SamOS/target/debug/libsamos_core.rlib: /home/sammo/Projects/SamOS/crates/samos-core/src/lib.rs /home/sammo/Projects/SamOS/crates/samos-core/src/modules/cpu.rs /home/sammo/Projects/SamOS/crates/samos-core/src/modules/mod.rs /home/sammo/Projects/SamOS/crates/samos-core/src/state.rs /home/sammo/Projects/SamOS/crates/samos-core/src/state_manager.rs
