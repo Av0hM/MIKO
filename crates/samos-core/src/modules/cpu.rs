@@ -1,28 +1,17 @@
 use anyhow::Result;
-use serde::Serialize;
 use sysinfo::System;
 
-use crate::modules::Module;
-
-#[derive(Serialize, Clone, Default)]
-pub struct CpuState {
-    pub usage: f32,
-}
+use crate::{modules::Module, state::State};
 
 pub struct CpuModule {
     sys: System,
-    pub state: CpuState,
 }
 
 impl CpuModule {
     pub fn new() -> Self {
         let mut sys = System::new_all();
         sys.refresh_cpu_all();
-
-        Self {
-            sys,
-            state: CpuState::default(),
-        }
+        Self { sys }
     }
 }
 
@@ -36,9 +25,9 @@ impl Module for CpuModule {
         Ok(())
     }
 
-    fn update(&mut self) -> Result<()> {
+    fn update(&mut self, state: &mut State) -> Result<()> {
         self.sys.refresh_cpu_usage();
-        self.state.usage = self.sys.global_cpu_usage();
+        state.cpu.usage = self.sys.global_cpu_usage();
         Ok(())
     }
 

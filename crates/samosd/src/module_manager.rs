@@ -1,5 +1,5 @@
 use anyhow::Result;
-use samos_core::modules::Module;
+use samos_core::{modules::Module, state::State};
 
 pub struct ModuleManager {
     modules: Vec<Box<dyn Module>>,
@@ -18,15 +18,14 @@ impl ModuleManager {
 
     pub fn init(&mut self) -> Result<()> {
         for module in &mut self.modules {
-            println!("Initializing {}", module.name());
             module.init()?;
         }
         Ok(())
     }
 
-    pub fn update(&mut self) -> Result<()> {
+    pub fn update(&mut self, state: &mut State) -> Result<()> {
         for module in &mut self.modules {
-            module.update()?;
+            module.update(state)?;
         }
         Ok(())
     }

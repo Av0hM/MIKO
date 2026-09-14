@@ -1,1 +1,12 @@
+pub mod battery;
+pub mod control;
 pub mod cpu;
+pub mod disk;
+pub mod memory;
+pub mod ai;
+pub mod automation;
+pub mod miko;
+pub mod network;
+pub mod temperature;
+pub mod visualizer;
+pub mod workspace;

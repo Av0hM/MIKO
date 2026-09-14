@@ -1,83 +1,72 @@
+mod export;
 mod module_manager;
 mod modules;
+
+use anyhow::Result;
 use chrono::Local;
-use serde::Serialize;
-use std::{fs, path::PathBuf};
+use samos_core::{
+    config::Config,
+    modules::{init_global_plugin_manager, shutdown_global_plugins, update_global_plugins},
+    state::State,
+};
+use std::path::PathBuf;
 use sysinfo::System;
 use tokio::time::{Duration, sleep};
 
-#[derive(Serialize)]
-struct Cpu {
-    usage: f32,
-}
+fn load_config() -> Config {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = PathBuf::from(home).join(".config/samos/config.toml");
 
-#[derive(Serialize)]
-struct Memory {
-    used_percent: f32,
-    used_mb: u64,
-    total_mb: u64,
-}
-
-#[derive(Serialize)]
-struct SystemInfo {
-    hostname: String,
-    time: String,
-    uptime: u64,
-}
-
-#[derive(Serialize)]
-struct State {
-    system: SystemInfo,
-    cpu: Cpu,
-    memory: Memory,
+    if path.exists() {
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        Config::default()
+    }
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let home = std::env::var("HOME")?;
-    let dir = PathBuf::from(format!("{home}/.local/state/samos"));
-    fs::create_dir_all(&dir)?;
-
-    let mut sys = System::new_all();
-
+async fn main() -> Result<()> {
     println!("SamOS daemon started");
+
+    let config = load_config();
+
+    // Initialize plugin manager
+    let plugin_dir = std::env::var("HOME").unwrap_or_default() + "/.local/lib/samos/plugins";
+    init_global_plugin_manager(&plugin_dir)?;
 
     let mut manager = module_manager::ModuleManager::new();
     manager.register(modules::cpu::CpuModule::new());
+    manager.register(modules::memory::MemoryModule::new());
+    manager.register(modules::battery::BatteryModule::new());
+    manager.register(modules::disk::DiskModule::new());
+    manager.register(modules::network::NetworkModule::new());
+    manager.register(modules::temperature::TemperatureModule::new());
+    manager.register(modules::control::ControlModule::new()?);
+    manager.register(modules::workspace::WorkspaceModule::new()?);
+    manager.register(modules::miko::MikoModule::new()?);
+    manager.register(modules::automation::AutomationModule::new()?);
+    manager.register(modules::visualizer::VisualizerModule::new()?);
+    manager.register(modules::ai::AiModule::new()?);
     manager.init()?;
 
     loop {
-        sys.refresh_all();
+        let mut state = State::default();
+        state.theme = config.theme.clone();
 
-        let total = sys.total_memory() / 1024 / 1024;
-        let used = sys.used_memory() / 1024 / 1024;
+        manager.update(&mut state)?;
+        update_global_plugins(&mut state)?;
 
-        let state = State {
-            system: SystemInfo {
-                hostname: System::host_name().unwrap_or_else(|| "unknown".into()),
-                time: Local::now().format("%H:%M:%S").to_string(),
-                uptime: System::uptime(),
-            },
-            cpu: Cpu {
-                usage: sys.global_cpu_usage(),
-            },
-            memory: Memory {
-                used_percent: if total > 0 {
-                    (used as f32 / total as f32) * 100.0
-                } else {
-                    0.0
-                },
-                used_mb: used,
-                total_mb: total,
-            },
-        };
+        state.system.hostname = std::fs::read_to_string("/etc/hostname")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
 
-        fs::write(
-            dir.join("state.json"),
-            serde_json::to_string_pretty(&state)?,
-        )?;
+        state.system.time = Local::now().format("%H:%M:%S").to_string();
+        state.system.uptime = System::uptime();
 
-        manager.update()?;
-        sleep(Duration::from_secs(1)).await;
+        export::export(&state)?;
+
+        sleep(Duration::from_millis(config.refresh_ms)).await;
     }
 }

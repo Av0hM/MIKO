@@ -1,0 +1,10 @@
+/home/sammo/Projects/SamOS/target/debug/deps/toml_writer-d0dd765359bda5c4.d: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/integer.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/key.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/string.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/value.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/write.rs
+
+/home/sammo/Projects/SamOS/target/debug/deps/libtoml_writer-d0dd765359bda5c4.rmeta: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/integer.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/key.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/string.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/value.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/write.rs
+
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/lib.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/integer.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/key.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/string.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/value.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml_writer-1.1.2+spec-1.1.0/src/write.rs:

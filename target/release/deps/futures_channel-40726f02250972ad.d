@@ -1,0 +1,11 @@
+/home/sammo/Projects/SamOS/target/release/deps/futures_channel-40726f02250972ad.d: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lock.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/mod.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/queue.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/oneshot.rs
+
+/home/sammo/Projects/SamOS/target/release/deps/libfutures_channel-40726f02250972ad.rlib: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lock.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/mod.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/queue.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/oneshot.rs
+
+/home/sammo/Projects/SamOS/target/release/deps/libfutures_channel-40726f02250972ad.rmeta: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lock.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/mod.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/queue.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/oneshot.rs
+
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lib.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/lock.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/mod.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/mpsc/queue.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.33/src/oneshot.rs:

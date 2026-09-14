@@ -1,0 +1,13 @@
+/home/sammo/Projects/SamOS/target/release/deps/url-07b1f36a0316382c.d: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/host.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/origin.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/parser.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/path_segments.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/slicing.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/quirks.rs
+
+/home/sammo/Projects/SamOS/target/release/deps/liburl-07b1f36a0316382c.rlib: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/host.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/origin.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/parser.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/path_segments.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/slicing.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/quirks.rs
+
+/home/sammo/Projects/SamOS/target/release/deps/liburl-07b1f36a0316382c.rmeta: /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/lib.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/host.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/origin.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/parser.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/path_segments.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/slicing.rs /home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/quirks.rs
+
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/lib.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/host.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/origin.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/parser.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/path_segments.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/slicing.rs:
+/home/sammo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/url-2.5.8/src/quirks.rs:
