@@ -12,7 +12,7 @@ type PluginShutdownFn = unsafe extern "C" fn() -> i32;
 
 pub struct LoadedPlugin {
     name: String,
-    library: Library,
+    _library: Library,
     update_fn: PluginUpdateFn,
     free_string_fn: PluginFreeStringFn,
     shutdown_fn: PluginShutdownFn,
@@ -37,6 +37,21 @@ impl LoadedPlugin {
             unsafe { desc_fn() }
         };
         
+        // Now get the function pointers we'll store - extract raw pointers first
+        let update_fn: PluginUpdateFn = {
+            let sym: Symbol<PluginUpdateFn> = unsafe { library.get(b"plugin_update")? };
+            *sym
+        };
+        let free_string_fn: PluginFreeStringFn = {
+            let sym: Symbol<PluginFreeStringFn> = unsafe { library.get(b"plugin_free_string")? };
+            *sym
+        };
+        let shutdown_fn: PluginShutdownFn = {
+            let sym: Symbol<PluginShutdownFn> = unsafe { library.get(b"plugin_shutdown")? };
+            *sym
+        };
+
+        anyhow::ensure!(!name_ptr.is_null() && !version_ptr.is_null() && !desc_ptr.is_null(), "Plugin metadata returned null");
         let init_result = {
             let init_fn: Symbol<PluginInitFn> = unsafe { library.get(b"plugin_init")? };
             unsafe { init_fn() }
@@ -44,20 +59,6 @@ impl LoadedPlugin {
         if init_result != 0 {
             return Err(anyhow::anyhow!("Plugin init failed with code {}", init_result));
         }
-
-        // Now get the function pointers we'll store - extract raw pointers first
-        let update_fn: PluginUpdateFn = {
-            let sym: Symbol<PluginUpdateFn> = unsafe { library.get(b"plugin_update")? };
-            unsafe { *sym }
-        };
-        let free_string_fn: PluginFreeStringFn = {
-            let sym: Symbol<PluginFreeStringFn> = unsafe { library.get(b"plugin_free_string")? };
-            unsafe { *sym }
-        };
-        let shutdown_fn: PluginShutdownFn = {
-            let sym: Symbol<PluginShutdownFn> = unsafe { library.get(b"plugin_shutdown")? };
-            unsafe { *sym }
-        };
 
         let name = unsafe { CStr::from_ptr(name_ptr).to_string_lossy().into_owned() };
         let version = unsafe { CStr::from_ptr(version_ptr).to_string_lossy().into_owned() };
@@ -67,7 +68,7 @@ impl LoadedPlugin {
 
         Ok(Self {
             name,
-            library,
+            _library: library,
             update_fn,
             free_string_fn,
             shutdown_fn,
@@ -121,7 +122,7 @@ impl PluginManager {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("so") {
-                self.load_plugin(&path)?;
+                if let Err(error) = self.load_plugin(&path) { eprintln!("[plugin] Skipping {}: {error}", path.display()); }
             }
         }
         Ok(())
