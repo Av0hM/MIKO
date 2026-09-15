@@ -13,11 +13,11 @@ pub struct VisualizerModule {
 
 impl VisualizerModule {
     pub fn new() -> Result<Self> {
-        let spectrum = Arc::new(Mutex::new(vec![0u8; 32]));
+        let spectrum = Arc::new(Mutex::new(vec![0u8; 120]));
         let spectrum_clone = spectrum.clone();
 
         let handle = thread::spawn(move || {
-            let config_path = format!("{}/.config/cava/config", std::env::var("HOME").unwrap_or_default());
+            let config_path = format!("{}/.config/cava/cava_samos.conf", std::env::var("HOME").unwrap_or_default());
             
             let mut child = match Command::new("cava")
                 .args(["-p", &config_path])
@@ -47,7 +47,7 @@ impl VisualizerModule {
                         let values: Vec<u8> = l.split(';')
                             .filter_map(|s| s.parse::<u8>().ok())
                             .collect();
-                        if values.len() == 32 {
+                        if values.len() == 120 {
                             *spectrum_clone.lock().unwrap() = values;
                         }
                     }

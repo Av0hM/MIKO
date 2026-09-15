@@ -1,0 +1,35 @@
+* { all: unset; font-family: "Adwaita Sans", "Noto Sans", sans-serif; font-size: 13px; color: #e9eff8; }
+window { background: transparent; }
+.card { background: linear-gradient(135deg, rgba(20,27,41,.94), rgba(10,15,24,.91)); border: 1px solid rgba(158,189,231,.17); border-radius: 24px; padding: 25px; margin: 5px; box-shadow: 0 8px 18px rgba(0,0,0,.22); }
+.eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1.6px; color: #8294ad; }
+.greeting { font-size: 25px; font-weight: 600; letter-spacing: -0.5px; }
+.status-dot { color: #8dbfff; font-size: 13px; }
+.metric-name { color: #899ab0; font-size: 9px; letter-spacing: 1px; font-weight: 600; }
+.metric-value { font-family: "Adwaita Mono", monospace; font-size: 29px; letter-spacing: -1.5px; }
+.metric-unit { color: #8ca3bd; padding-bottom: 4px; }
+progressbar trough { min-height: 3px; min-width: 65px; border-radius: 3px; background: #263144; }
+progressbar progress { min-height: 3px; border-radius: 3px; background: linear-gradient(90deg,#487cec,#9bdcff); }
+.divider { background: rgba(156,184,223,.12); min-height: 1px; }
+.subtle { color: #91a0b5; font-size: 12px; }
+.workspace { background: rgba(103,137,184,.08); border: 1px solid rgba(138,164,201,.13); border-radius: 10px; min-width: 30px; min-height: 31px; }
+.workspace.active { color: #b8daff; background: rgba(56,117,205,.3); border-color: rgba(103,167,255,.6); }
+button:hover { background: rgba(99,154,226,.22); border-color: #73acfa; }
+button:disabled { opacity: .5; }
+.clock { font-size: 67px; font-weight: 300; letter-spacing: -3px; }
+.seconds { font-family: "Adwaita Mono", monospace; font-size: 17px; color: #7894b9; padding-bottom: 14px; }
+.chip { border: 1px solid rgba(142,169,207,.18); border-radius: 11px; padding: 10px 12px; color: #a1b0c4; font-size: 12px; }
+.enabled { color: #b5d8ff; background: rgba(58,108,172,.18); }
+.primary { background: #387fe4; border-color: #5897ed; color: white; }
+.track { font-size: 17px; font-weight: 600; }
+.transport { border-radius: 12px; background: rgba(139,166,203,.09); min-width: 33px; min-height: 32px; font-size: 19px; }
+.transport.primary { background: #387fe4; }
+.miko-name { font-size: 25px; font-weight: 600; letter-spacing: -1px; }
+.badge { color: #95b8ed; font-size: 8px; letter-spacing: 1px; background: rgba(58,108,172,.18); border-radius: 6px; padding: 6px 8px; }
+.reply { color: #c7d4e7; font-size: 13px; }
+.user-message { background: rgba(65,126,208,.17); border-radius: 11px; padding: 10px 12px; }
+.confirmation { color: #c3dafe; font-size: 12px; }
+.compose { background: rgba(139,166,203,.08); border: 1px solid rgba(142,169,207,.2); border-radius: 12px; padding: 14px 16px; color: #a7b8cf; }
+.frequency { background: linear-gradient(0deg,rgba(45,112,221,.7),rgba(122,196,255,.9)); border-radius: 5px 5px 0 0; min-width: 3px; }
+.horizon { background: linear-gradient(90deg,rgba(73,137,229,0),rgba(115,181,255,.65),rgba(73,137,229,0)); }
+scrollbar { min-width: 3px; }
+scrollbar slider { background: #384e6a; border-radius: 4px; }

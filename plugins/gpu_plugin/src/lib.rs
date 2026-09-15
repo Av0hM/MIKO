@@ -8,7 +8,7 @@ static INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 fn read_intel_gpu() -> Option<Value> {
     let output = Command::new("sudo")
-        .args(["-n", "intel_gpu_top", "-J", "-s", "1", "-o", "-"])
+        .args(["-n", "intel_gpu_top", "-J", "-s", "100", "-n", "2", "-o", "-"])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -78,27 +78,19 @@ fn read_amd() -> Option<Value> {
     None
 }
 
-use serde_json::{json, Value};
-use std::ffi::CString;
-use std::os::raw::c_char;
-use std::process::Command;
-use std::sync::Mutex;
-
-static INITIALIZED: Mutex<bool> = Mutex::new(false);
-
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_name() -> *const c_char {
-    CString::new("gpu_monitor").unwrap().into_raw()
+    c"gpu_monitor".as_ptr()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_version() -> *const c_char {
-    CString::new("0.1.0").unwrap().into_raw()
+    c"0.1.0".as_ptr()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_description() -> *const c_char {
-    CString::new("Monitors GPU stats (Intel iGPU via intel_gpu_top/sysfs, NVIDIA via nvidia-smi, AMD via rocm-smi)").unwrap().into_raw()
+    c"Monitors GPU stats via sysfs and vendor utilities".as_ptr()
 }
 
 #[unsafe(no_mangle)]
@@ -114,8 +106,8 @@ pub extern "C" fn plugin_update() -> *mut c_char {
         return std::ptr::null_mut();
     }
 
-    let data = read_intel_gpu()
-        .or_else(read_sysfs_intel)
+    let data = read_sysfs_intel()
+        .or_else(read_intel_gpu)
         .or_else(read_nvidia)
         .or_else(read_amd)
         .unwrap_or_else(|| json!({}));

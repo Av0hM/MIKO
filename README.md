@@ -1,45 +1,57 @@
 # SamOS
 
-A modular desktop layer built on Hyprland (Arch Linux). Rust daemon collects system metrics and exports JSON, consumed by Eww widgets. Not a Linux distro — a desktop environment layer on Arch + Hyprland.
+A modular desktop layer built on Hyprland (Arch Linux). Rust daemon collects system metrics and exports JSON/Unix socket, consumed by Eww widgets. Not a Linux distro — a desktop environment layer on Arch + Hyprland.
 
-**Status:** Development - Core daemon + Voice I/O (STT/TTS) + AI Assistant (MIKO) working end-to-end.
+**Status:** Development - Core daemon + Voice I/O (STT/TTS) + AI Assistant (MIKO) + Automation Engine + Audio Visualizer + IPC migration working.
 
 ## Architecture
 
 ```
-��─────────────��    ��──────────────��    ��─────────────��    ��────────────��    ��──────────────��
-│   Modules   │───��│ Module Mgr   │───��│ Shared State │───��│  Exporter  │───��│  state.json  │
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌────────────┐    ┌──────────────┐
+│   Modules   │───▶│ Module Mgr   │───▶│ Shared State │───▶│  Exporter  │───▶│  state.json  │
 │ (CPU, Mem,  │    │ (1s loop)    │    │ (single src) │    │ (JSON file)│    │  (1s poll)   │
 │  Bat, Disk, │    │              │    │ of truth)    │    │            │    │              │
 │  Net, Temp, │    │              │    │              │    │            │    │              │
 │  Ctrl, WS,  │    │              │    │              │    │            │    │              │
-│  AI/Miko)   │    │              │    │              │    │            │    │              │
-��─────────────��    └──────────────��    └─────────────��    └────────────��    └──────��───────��
-                                                                                    ��
-                                                                      ��───────────────────��
-                                                                      │   Eww Widgets     │
-                                                                      │ (HUD, Launcher,   │
-                                                                      │  Control, WS,    │
-                                                                      │  Notifications,  │
-                                                                      │  AI/MIKO Chat,   │
-                                                                      │  Voice I/O)      │
-                                                                      └───────────────────��
+│  AI, Vis,   │    │              │    │              │    │            │    │              │
+│  Autom)     │    │              │    │              │    │            │    │              │
+└─────────────┘    └──────────────┘    └─────────────┘    └────────────┘    └──────┬───────┘
+                                                                                     │
+                                       ┌────────────────────────────────────────────┘
+                                       │
+                                       ▼
+                        ┌─────────────────────────────────────────────┐
+                        │              IPC Layer                      │
+                        │  ┌─────────────┐  ┌─────────────────────┐  │
+                        │  │ state.sock  │  │      ai.sock        │  │
+                        │  │ (full state)│  │ (AI chat + tools)   │  │
+                        │  └─────────────┘  └─────────────────────┘  │
+                        └─────────────────────────────────────────────┘
+                                       │
+                                       ▼
+                        ┌─────────────────────────────────────────────┐
+                        │             Eww Widgets                     │
+                        │ (HUD, Launcher, Control, WS, Notifications, │
+                        │  AI/MIKO Chat, Voice I/O, Visualizer,       │
+                        │  Automation Rules UI)                       │
+                        └─────────────────────────────────────────────┘
 ```
 
 ## Current Components
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| **samosd** (daemon) | �� Complete | 1s poll daemon, 7 modules, systemd service |
-| **Core Modules** | �� Complete | CPU, Memory, Battery, Disk, Network, Temperature, Control, Workspace |
-| **Theme Engine** | �� Complete | 6 themes (hud/hacker/elegant/motivation/love/movie), runtime switching |
-| **Control Center** | �� Complete | WiFi/BT status, toggles via `samosctl` |
-| **Workspace Manager** | �� Complete | hyprctl-based, click-to-switch |
-| **AI Assistant (MIKO)** | �� Complete | Local Ollama (qwen2.5:7b), 8 tools, SQLite memory |
-| **Voice STT** | �� Complete | whisper.cpp (ggml-base), file + microphone recording |
-| **Voice TTS** | �� Complete | piper (en_US-lessac-medium), eSpeak-ng backend |
-| **Plugin System** | �� Skeleton | Dynamic `.so` loading, GPU monitor example |
-| **Theme Engine** | �� Complete | Runtime SCSS variables, 6 extracted themes |
+| **samosd** (daemon) | ✅ Complete | 1s poll daemon, 10 modules, systemd service |
+| **Core Modules** | ✅ Complete | CPU, Memory, Battery, Disk, Network, Temperature, Control, Workspace |
+| **Theme Engine** | ✅ Complete | 6 themes (hud/hacker/elegant/motivation/love/movie), runtime switching |
+| **Control Center** | ✅ Complete | WiFi/BT status, toggles via `samosctl` |
+| **Workspace Manager** | ✅ Complete | hyprctl-based, click-to-switch |
+| **Audio Visualizer** | ✅ Complete | cava spectrum (32 bars) + playerctl now-playing (MPRIS) |
+| **Automation Engine** | ✅ Complete | Rules engine with conditions/actions, validation, security allowlist |
+| **AI Assistant (v1)** | ✅ Complete | Request-driven AiModule, Unix socket IPC, 5 tools, SQLite memory |
+| **Voice STT** | ✅ Complete | whisper.cpp (ggml-base), file + microphone recording |
+| **Voice TTS** | ✅ Complete | piper (en_US-lessac-medium), eSpeak-ng backend |
+| **Plugin System** | ✅ Skeleton | Dynamic `.so` loading, GPU monitor example |
 
 ## Voice I/O (Phase 4d - Complete)
 
@@ -54,23 +66,67 @@ A modular desktop layer built on Hyprland (Arch Linux). Rust daemon collects sys
 - `tts_speak` - Convert text to speech + play
 - `stt_record_and_transcribe` - Record mic + transcribe
 
-## AI Assistant (MIKO)
+## AI Assistant (v1 - Complete)
 
-**Local-first:** Ollama (qwen2.5:7b) via REST API, no cloud calls.
+**Backend:** Request-driven `AiModule` in `samos-core`, Unix socket IPC at `~/.local/state/samos/ai.sock`, calls Ollama REST API (`http://localhost:11434`, qwen2.5:7b).
 
-**Tools (8):**
-1. `get_system_state` - Read live metrics
-2. `launch_app` - Launch via `.desktop` (confirmation)
-3. `switch_workspace` - hyprctl dispatch (confirmation)
-4. `set_theme` - Theme switch (confirmation)
-5. `add_reminder` / `list_reminders` - SQLite persisted
-6. `stt_transcribe` - Audio file → text
-7. `tts_speak` - Text → speech + play
-8. `stt_record_and_transcribe` - Record + transcribe
+**Tool Set (v1):**
+| Tool | Description | Confirmation |
+|------|-------------|--------------|
+| `get_system_state` | Reads current State (CPU/RAM/battery/etc.) | No (read-only) |
+| `launch_app` | Launch via `.desktop` (gtk-launch) | Yes |
+| `switch_workspace` | Via hyprctl dispatch | Yes |
+| `set_theme` | Writes config.toml, reloads Eww | Yes |
+| `add_reminder` / `list_reminders` | SQLite-backed | No |
 
-**Memory:** SQLite (`~/.local/state/samos/ai.db`) - reminders + conversation summaries (no vector DB yet).
+**Memory:** SQLite (`~/.local/state/samos/ai.db`) - reminders + conversation summaries.
 
-**Confirmation Gate:** Mutating tools require explicit confirm/deny in chat UI.
+**Confirmation Gate:** Mutating tools require explicit confirm/deny via `ConfirmTool` IPC message.
+
+**IPC Protocol:**
+```json
+// Request
+{"type": "Chat", "message": "Switch theme to hacker", "conversation_id": "abc"}
+// Response (confirmation needed)
+{"type": "Done", "summary": "CONFIRMATION_REQUIRED:call_xyz"}
+// Confirm
+{"type": "ConfirmTool", "tool_call_id": "call_xyz", "confirmed": true}
+// Final response
+{"type": "ToolResult", "tool_call_id": "call_xyz", "result": "Theme set to: hacker"}
+```
+
+## Automation Engine (Phase 4e - Complete)
+
+**Rules file:** `~/.config/samos/rules.json` - loaded at startup, hot-reloaded on change.
+
+**Rule structure:**
+```json
+{
+  "id": "unique-id",
+  "name": "High CPU Alert",
+  "enabled": true,
+  "conditions": [
+    {"field": "cpu.usage", "operator": "greater_than", "value": 90}
+  ],
+  "actions": [
+    {"type": "notify"},
+    {"type": "log", "message": "High CPU detected"}
+  ]
+}
+```
+
+**Supported operators:** `equals`, `not_equals`, `greater_than`, `less_than`, `contains`, `starts_with`, `ends_with`
+
+**Actions:** `notify`, `log`, `run_command` (allowlist), `set_theme`, `set_power_profile`, `toggle_wifi`, `toggle_bluetooth`, `switch_workspace`, `launch_app`, `speak`
+
+**Security:** `run_command` allowlist: `samosctl`, `hyprctl dispatch workspace`, `powerprofilesctl set`, `gtk-launch`, `notify-send`. Denylist blocks: `rm`, `sudo`, `dd`, `mkfs`, `shutdown`, `reboot`, `kill`, shell metacharacters.
+
+## Audio Visualizer (Complete)
+
+- `cava` reads live PipeWire/Pulse audio output, streams 32-bar spectrum (0-100 range) at 60fps
+- `playerctl` provides now-playing via MPRIS (title, artist, status: Playing/Paused/Stopped)
+- Exported in `state.visualizer` (spectrum + now_playing_*)
+- Toggled with `SUPER+M` → `samos_visualizer_window`
 
 ## Quick Start
 
@@ -83,7 +139,7 @@ cargo build --release -p samosd -p samosctl
 systemctl --user restart samosd.service
 
 # Start Eww (separate terminal)
-eww daemon && eww open samos_hud_window samos_control_window samos_workspace_window
+eww daemon && eww open samos_hud_window samos_control_window samos_workspace_window samos_visualizer_window
 
 # Test voice
 piper --model ~/.local/share/piper/voices/en_US-lessac-medium.onnx --output_file /tmp/test.wav <<< "Hello MIKO"
@@ -94,7 +150,7 @@ whisper-cli -m ~/.local/share/whisper.cpp/models/ggml-base.bin -f audio.wav -l e
 # Test MIKO chat (requires Ollama running)
 ollama serve &
 systemctl --user restart samosd.service
-# MIKO available via Eww chat widget or samosctl (when wired)
+# Connect to ~/.local/state/samos/ai.sock for AI chat
 ```
 
 ## Service Management
@@ -112,7 +168,7 @@ ollama pull qwen2.5:7b
 
 # Eww
 eww reload
-eww open samos_hud_window samos_control_window samos_workspace_window samos_ai_chat_window
+eww open samos_hud_window samos_control_window samos_workspace_window samos_visualizer_window samos_ai_chat_window
 eww close samos_control_window samos_workspace_window
 ```
 
@@ -126,6 +182,8 @@ refresh_ms = 1000
 ```
 
 Themes live in `~/.config/samos/themes/{name}.toml` (auto-generated from system rice).
+
+Automation rules: `~/.config/samos/rules.json`
 
 ## Development
 
@@ -154,7 +212,7 @@ cargo fmt && cargo clippy
 ├── crates/
 │   ├── samos-core/         # Core logic, modules, state, config
 │   │   └── src/
-│   │       ├── modules/    # CPU, Memory, Battery, Disk, Network, Temperature, Control, Workspace, MIKO, Plugin
+│   │       ├── modules/    # CPU, Memory, Battery, Disk, Network, Temperature, Control, Workspace, AI, Visualizer, Automation, Plugin, MIKO
 │   │       ├── state.rs    # Single State struct (source of truth)
 │   │       ├── config.rs   # Config struct (theme/monitor/refresh_ms)
 │   │       ├── plugin.rs   # Plugin trait + manager (dynamic .so loading)
@@ -164,42 +222,43 @@ cargo fmt && cargo clippy
 │   │       ├── main.rs           # Daemon loop
 │   │       ├── module_manager.rs # Module registration + loop
 │   │       ├── export.rs         # JSON export to state.json
+│   │       ├── ipc.rs            # Unix socket IPC server (state.sock)
 │   │       └── modules/          # Wrapper re-exports
 │   ├── samosctl/           # CLI for toggles (wifi, bt, theme, power)
-│   ├── samos-ipc/          # Placeholder (future Unix socket IPC)
-│   ├── samos-theme/        # Placeholder (theme library)
-│   └── samos-modules/      # Placeholder (module library)
 ├── plugins/
 │   └── gpu_plugin/         # Example GPU monitor plugin (.so)
-├── ~/.config/samos/        # Config + themes
-├── ~/.local/state/samos/   # state.json + ai.db
+├── ~/.config/samos/        # Config + themes + rules.json
+├── ~/.local/state/samos/   # state.json + ai.db + state.sock + ai.sock
 ├── ~/.local/share/         # Models, voices, espeak-ng-data
 ├── ~/.local/bin/           # piper, whisper-cli, samosctl
-��── ~/.config/samosctl/     # samosctl config (future)
 ```
 
 ## Roadmap
 
 | Phase | Target | Status |
 |-------|--------|--------|
-| Phase 3 | Control Center, Workspace Manager, Theme Engine | �� Done |
-| Phase 4a | Theme Engine (runtime) | �� Done |
-| Phase 4b | Plugin System | �� Skeleton |
-| Phase 4c | AI Assistant (MIKO) | �� Done |
-| Phase 4d | Voice I/O (STT/TTS) | �� Done |
-| Phase 4e | Automation/Rules Engine | ��� Next |
-| Phase 5 | IPC Migration (Unix socket), Packaging, Testing, AUR | ��� Pending |
+| Phase 3 | Control Center, Workspace Manager, Theme Engine | ✅ Done |
+| Phase 4a | Theme Engine (runtime) | ✅ Done |
+| Phase 4b | Plugin System | ✅ Skeleton |
+| Phase 4c | AI Assistant (MIKO v1 - request-driven, Unix socket) | ✅ Done |
+| Phase 4d | Voice I/O (STT/TTS) | ✅ Done |
+| Phase 4e | Automation/Rules Engine | ✅ Done |
+| Phase 4f | Audio Visualizer | ✅ Done |
+| **Phase 5** | Full IPC migration (state.sock for all consumers), Packaging, Testing, AUR | 🔄 In Progress |
+| Phase 6 | Voice v1.5 (push-to-talk), Eww AI chat panel, Wake-word | ⏳ Pending |
 
 ## Known Issues / Technical Debt
 
 - `samosd` wrapper modules are redundant re-exports (known, tracked)
-- JSON file export (1s full rewrite) - planned Unix socket migration
+- JSON file export (1s full rewrite) - planned Unix socket migration (state.sock done for full state)
 - Battery hardcoded to `/sys/class/power_supply/BAT0`
 - Temperature picks first sensor only
 - Ollama not in systemd (runs manually)
 - MIKO tools `stt_*` and `tts_speak` need Eww widget integration
 - No CI/CD, no tests yet
-- Theme switching restarts samosd + reloads Eww (intentional for now)
+- Theme switching writes config.toml + reloads Eww (intentional for now)
+- `process_chat` recursion requires `Box::pin` (async recursion)
+- GPU plugin has duplicate definitions (pre-existing, not blocking core)
 
 ## License
 

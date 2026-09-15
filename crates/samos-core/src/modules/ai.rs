@@ -1,775 +1,364 @@
-use anyhow::{anyhow, Result};
+//! Request-driven local assistant. IPC never executes shell text from a model.
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
 use std::thread;
-use std::io::{BufRead, BufReader, Write};
-
+use std::time::{Duration, Instant};
 use crate::{modules::Module, state::State};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OllamaChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Tool>>,
-    stream: bool,
-}
+const MODEL: &str = "qwen2.5:7b";
+const MAX_TURNS: usize = 8;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatMessage {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Message {
     role: String,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default)] content: String,
+    #[serde(skip_serializing_if="Option::is_none")] tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if="Option::is_none")] tool_name: Option<String>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Tool {
-    #[serde(rename = "type")]
-    tool_type: String,
-    function: FunctionDef,
+impl Message {
+    fn new(role: &str, content: impl Into<String>) -> Self {
+        Self { role: role.into(), content: content.into(), tool_calls: None, tool_name: None }
+    }
+    fn result(call: &ToolCall, result: String) -> Self {
+        Self { tool_name: Some(call.function.name.clone()), ..Self::new("tool", result) }
+    }
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FunctionDef {
-    name: String,
-    description: String,
-    parameters: ToolParameters,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolParameters {
-    #[serde(rename = "type")]
-    param_type: String,
-    properties: HashMap<String, ToolProperty>,
-    required: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolProperty {
-    #[serde(rename = "type")]
-    prop_type: String,
-    description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OllamaChatResponse {
-    model: String,
-    message: ChatMessage,
-    done: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ToolCall {
-    id: String,
-    #[serde(rename = "type", default)]
-    tool_type: String,
-    function: ToolCallFunction,
+    #[serde(default)] id: String,
+    function: Function,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolCallFunction {
-    #[serde(default)]
-    index: u32,
-    name: String,
-    arguments: serde_json::Value,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum AiRequest {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Function { name: String, #[serde(default)] arguments: Value }
+#[derive(Deserialize)]
+#[serde(tag="type")]
+enum Request {
     Chat { message: String, conversation_id: Option<String> },
-    ConfirmTool { tool_call_id: String, confirmed: bool },
+    ConfirmTool { tool_call_id: String, confirmed: bool, conversation_id: Option<String> },
+    Voice { conversation_id: Option<String> },
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum AiResponse {
-    Token { text: String },
-    ToolCall { tool_call: ToolCall },
-    ToolResult { tool_call_id: String, result: String },
-    Done { summary: Option<String> },
-    Error { message: String },
-}
-
-pub struct AiModule {
+struct Pending { call: ToolCall, remaining: Vec<ToolCall>, created: Instant }
+#[derive(Default)]
+struct Session { messages: Vec<Message>, pending: Option<Pending>, touched: Option<Instant> }
+struct Assistant {
     client: reqwest::Client,
-    ollama_url: String,
-    model: String,
-    db: Arc<Mutex<rusqlite::Connection>>,
-    pending_confirmations: Arc<Mutex<HashMap<String, ToolCall>>>,
-    socket_path: String,
-    listener_handle: Option<thread::JoinHandle<()>>,
-    pending_chats: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
+    db: Mutex<rusqlite::Connection>,
+    sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
+    home: PathBuf,
+    url: String,
+    busy: AtomicUsize,
+    health: Mutex<String>,
 }
-
-impl AiModule {
-    pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let db_path = format!("{}/.local/state/samos/ai.db", home);
-
-        std::fs::create_dir_all(std::path::Path::new(&db_path).parent().unwrap())?;
-
-        let conn = rusqlite::Connection::open(&db_path)?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text TEXT NOT NULL,
-                due_at INTEGER,
-                created_at INTEGER NOT NULL
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                summary TEXT
-            )",
-            [],
-        )?;
-
-        let socket_path = format!("{}/.local/state/samos/ai.sock", home);
-        std::fs::create_dir_all(std::path::Path::new(&socket_path).parent().unwrap())?;
-
-        Ok(Self {
-            client: reqwest::Client::new(),
-            ollama_url: "http://localhost:11434".to_string(),
-            model: "qwen2.5:7b".to_string(),
-            db: Arc::new(Mutex::new(conn)),
-            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            socket_path,
-            listener_handle: None,
-            pending_chats: Arc::new(Mutex::new(HashMap::new())),
-        })
+impl Assistant {
+    fn new(home: PathBuf, url: String) -> Result<Self> {
+        let directory=home.join(".local/state/samos"); std::fs::create_dir_all(&directory)?;
+        let db=rusqlite::Connection::open(directory.join("ai.db"))?;
+        db.busy_timeout(Duration::from_secs(2))?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, due_at INTEGER, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, summary TEXT NOT NULL, updated_at INTEGER NOT NULL);")?;
+        Ok(Self { client: reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(90)).build()?, db: Mutex::new(db), sessions: Mutex::new(HashMap::new()), home, url, busy: AtomicUsize::new(0), health: Mutex::new("idle".into()) })
     }
-
-    fn get_tools(&self) -> Vec<Tool> {
-        vec![
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDef {
-                    name: "get_system_state".to_string(),
-                    description: "Get current system state (CPU, memory, battery, disk, network, temperature)".to_string(),
-                    parameters: ToolParameters {
-                        param_type: "object".to_string(),
-                        properties: HashMap::new(),
-                        required: vec![],
-                    },
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDef {
-                    name: "launch_app".to_string(),
-                    description: "Launch an application by name (requires confirmation)".to_string(),
-                    parameters: ToolParameters {
-                        param_type: "object".to_string(),
-                        properties: {
-                            let mut props = HashMap::new();
-                            props.insert("app_name".to_string(), ToolProperty {
-                                prop_type: "string".to_string(),
-                                description: "Name of the application to launch".to_string(),
-                            });
-                            props
-                        },
-                        required: vec!["app_name".to_string()],
-                    },
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDef {
-                    name: "switch_workspace".to_string(),
-                    description: "Switch to a different workspace (requires confirmation)".to_string(),
-                    parameters: ToolParameters {
-                        param_type: "object".to_string(),
-                        properties: {
-                            let mut props = HashMap::new();
-                            props.insert("workspace_id".to_string(), ToolProperty {
-                                prop_type: "integer".to_string(),
-                                description: "Workspace ID to switch to".to_string(),
-                            });
-                            props
-                        },
-                        required: vec!["workspace_id".to_string()],
-                    },
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDef {
-                    name: "set_theme".to_string(),
-                    description: "Change the theme (requires confirmation)".to_string(),
-                    parameters: ToolParameters {
-                        param_type: "object".to_string(),
-                        properties: {
-                            let mut props = HashMap::new();
-                            props.insert("theme".to_string(), ToolProperty {
-                                prop_type: "string".to_string(),
-                                description: "Theme name (hud, hacker, elegant, motivation, love, movie)".to_string(),
-                            });
-                            props
-                        },
-                        required: vec!["theme".to_string()],
-                    },
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDef {
-                    name: "add_reminder".to_string(),
-                    description: "Add a reminder with optional due time".to_string(),
-                    parameters: ToolParameters {
-                        param_type: "object".to_string(),
-                        properties: {
-                            let mut props = HashMap::new();
-                            props.insert("text".to_string(), ToolProperty {
-                                prop_type: "string".to_string(),
-                                description: "Reminder text".to_string(),
-                            });
-                            props.insert("due_at".to_string(), ToolProperty {
-                                prop_type: "integer".to_string(),
-                                description: "Unix timestamp for due time (optional)".to_string(),
-                            });
-                            props
-                        },
-                        required: vec!["text".to_string()],
-                    },
-                },
-            },
-            Tool {
-                tool_type: "function".to_string(),
-                function: FunctionDef {
-                    name: "list_reminders".to_string(),
-                    description: "List all active reminders".to_string(),
-                    parameters: ToolParameters {
-                        param_type: "object".to_string(),
-                        properties: HashMap::new(),
-                        required: vec![],
-                    },
-                },
-            },
-        ]
-    }
-
-    async fn execute_tool(&self, tool_call: &ToolCall, state: &State) -> Result<String> {
-        let args: Value = tool_call.function.arguments.clone();
-
-        match tool_call.function.name.as_str() {
-            "get_system_state" => {
-                Ok(format!(
-                    "CPU: {:.1}%, RAM: {:.1}%, Battery: {:.0}% ({}), Disk: {:.1}%, Net: {}KB ↑{}KB, Temp: {:.1}°C",
-                    state.cpu.usage,
-                    state.memory.used_percent,
-                    state.battery.percent,
-                    state.battery.status,
-                    state.disk.used_percent,
-                    state.network.rx_kb,
-                    state.network.tx_kb,
-                    state.temperature.celsius
-                ))
-            }
-            "launch_app" => {
-                let app_name = args.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
-                let output = std::process::Command::new("sh")
-                    .args(["-c", &format!("gtk-launch {} 2>/dev/null || echo 'failed'", app_name)])
-                    .output()?;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                Ok(stdout.trim().to_string())
-            }
-            "switch_workspace" => {
-                let workspace_id = args.get("workspace_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                let output = std::process::Command::new("hyprctl")
-                    .args(["dispatch", "workspace", &workspace_id.to_string()])
-                    .output()?;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                Ok(stdout.trim().to_string())
-            }
-            "set_theme" => {
-                let theme = args.get("theme").and_then(|v| v.as_str()).unwrap_or("");
-                let output = std::process::Command::new("samosctl")
-                    .args(["theme-set", theme])
-                    .output()?;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                Ok(stdout.trim().to_string())
-            }
-            "add_reminder" => {
-                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let due_at = args.get("due_at").and_then(|v| v.as_i64());
-
-                let conn = self.db.lock().unwrap();
-                let created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs() as i64;
-
-                conn.execute(
-                    "INSERT INTO reminders (text, due_at, created_at) VALUES (?, ?, ?)",
-                    rusqlite::params![text, due_at, created_at],
-                )?;
-
-                Ok(format!("Reminder added: {}", text))
-            }
-            "list_reminders" => {
-                let conn = self.db.lock().unwrap();
-                let mut stmt = conn.prepare(
-                    "SELECT id, text, due_at FROM reminders ORDER BY created_at DESC"
-                )?;
-
-                let reminders: Vec<String> = stmt.query_map([], |row| {
-                    let id: i64 = row.get(0)?;
-                    let text: String = row.get(1)?;
-                    let due_at: Option<i64> = row.get(2)?;
-
-                    let due_str = due_at.map(|d| format!(" (due: {})",
-                        chrono::DateTime::from_timestamp(d, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| d.to_string())
-                    )).unwrap_or_default();
-
-                    Ok(format!("[{}] {}{}", id, text, due_str))
-                })?.collect::<Result<Vec<_>, _>>()?;
-
-                if reminders.is_empty() {
-                    Ok("No reminders".to_string())
-                } else {
-                    Ok(reminders.join("\n"))
-                }
-            }
-            _ => Ok(format!("Unknown tool: {}", tool_call.function.name)),
+    fn live_state(&self) -> Result<State> {
+        let path=self.home.join(".local/state/samos/state.json");
+        ensure!(path.metadata()?.modified()?.elapsed()?.as_secs()<15, "System metrics are stale");
+        for _ in 0..3 {
+            if let Ok(state)=serde_json::from_slice(&std::fs::read(&path)?) { return Ok(state); }
+            thread::sleep(Duration::from_millis(15));
         }
+        bail!("System metrics are being refreshed; please retry")
     }
-
-    async fn chat_with_ollama(&self, messages: &[ChatMessage], state: &State) -> Result<String> {
-        let system_prompt = format!(
-            "You are MIKO, an AI assistant integrated into the SamOS Linux desktop environment. \
-             You have access to system information and can control the desktop. \
-             Use tools when appropriate. Be concise and helpful.\n\n\
-             Current system state: CPU {:.1}%, RAM {:.1}%, Battery {}% ({}), Disk {:.1}%",
-            state.cpu.usage,
-            state.memory.used_percent,
-            state.battery.percent,
-            state.battery.status,
-            state.disk.used_percent
-        );
-
-        let mut full_messages = vec![
-            ChatMessage { role: "system".to_string(), content: system_prompt, tool_calls: None },
-        ];
-        full_messages.extend(messages.iter().cloned());
-
-        let request = OllamaChatRequest {
-            model: self.model.clone(),
-            messages: full_messages,
-            tools: Some(self.get_tools()),
-            stream: false,
+    fn session(&self, id: &str) -> Result<Arc<Mutex<Session>>> {
+        ensure!(!id.is_empty() && id.len()<=128, "Invalid conversation ID");
+        let mut sessions=self.sessions.lock().map_err(|_|anyhow::anyhow!("Session unavailable"))?;
+        if !sessions.contains_key(id) && sessions.len()>=64 {
+            sessions.retain(|_, session| session.try_lock().map_or(true, |s| s.touched.is_some_and(|t| t.elapsed()<Duration::from_secs(3600))));
+            ensure!(sessions.len()<64, "Too many conversations; retry later");
+        }
+        Ok(sessions.entry(id.into()).or_default().clone())
+    }
+    async fn ask(&self, messages: &[Message], tools: bool) -> Result<Message> {
+        let request=json!({"model":MODEL,"messages":messages,"stream":false,"tools":if tools {tool_definitions()} else {Vec::new()},"options":{"num_predict":1024,"num_ctx":4096}});
+        let response=self.client.post(format!("{}/api/chat",self.url)).json(&request).send().await.context("Cannot reach local Ollama")?;
+        ensure!(response.status().is_success(),"Ollama returned {}. Check that {MODEL} is installed.",response.status());
+        let body:Value=response.json().await?;
+        Ok(serde_json::from_value(body.get("message").context("Missing Ollama message")?.clone())?)
+    }
+    async fn handle(&self, request: Request) -> Result<Value> {
+        let id=match &request {
+            Request::Chat{conversation_id,..}|Request::Voice{conversation_id}|Request::ConfirmTool{conversation_id,..} => conversation_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),
         };
-
-        let response = self.client
-            .post(&format!("{}/api/chat", self.ollama_url))
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let err = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama error: {}", err));
-        }
-
-        let chat_response: OllamaChatResponse = response.json().await?;
-
-        let tool_calls = chat_response.message.tool_calls.clone();
-        let message_content = chat_response.message.content.clone();
-
-        if let Some(tool_calls) = tool_calls {
-            for tool_call in tool_calls {
-                if tool_call.function.name == "launch_app"
-                    || tool_call.function.name == "switch_workspace"
-                    || tool_call.function.name == "set_theme"
-                {
-                    self.pending_confirmations.lock().unwrap()
-                        .insert(tool_call.id.clone(), tool_call.clone());
-                    return Ok(format!("CONFIRMATION_REQUIRED:{}", tool_call.id));
-                }
-
-                let result = self.execute_tool(&tool_call, state).await?;
-                self.save_tool_result(&tool_call, &result)?;
-
-                return Box::pin(self.chat_with_ollama(&[
-                    ChatMessage {
-                        role: "assistant".to_string(),
-                        content: message_content.clone(),
-                        tool_calls: None,
-                    },
-                    ChatMessage {
-                        role: "tool".to_string(),
-                        content: result,
-                        tool_calls: None,
-                    },
-                ], state)).await;
-            }
-        }
-
-        Ok(message_content)
-    }
-
-    fn save_tool_result(&self, tool_call: &ToolCall, result: &str) -> Result<()> {
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO conversations (role, content, timestamp, summary) VALUES (?, ?, ?, ?)",
-            rusqlite::params!["tool", format!("{}: {}", tool_call.function.name, result),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64,
-                result],
-        )?;
-        Ok(())
-    }
-
-    fn save_message(&self, role: &str, content: &str) -> Result<()> {
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO conversations (role, content, timestamp, summary) VALUES (?, ?, ?, ?)",
-            rusqlite::params![role, content,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64,
-                content],
-        )?;
-        Ok(())
-    }
-
-    fn get_recent_context(&self, limit: usize) -> Result<String> {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT role, content FROM conversations ORDER BY timestamp DESC LIMIT ?"
-        )?;
-
-        let messages = stmt.query_map([limit], |row| {
-            let role: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            Ok(format!("{}: {}", role, content))
-        })?.collect::<Result<Vec<_>, _>>()?;
-
-        Ok(messages.into_iter().rev().collect::<Vec<_>>().join("\n"))
-    }
-
-    fn start_socket_listener(&mut self) -> Result<()> {
-        let socket_path = self.socket_path.clone();
-        if Path::new(&socket_path).exists() {
-            std::fs::remove_file(&socket_path)?;
-        }
-
-        let listener = UnixListener::bind(&socket_path)?;
-
-        let pending_confirmations = self.pending_confirmations.clone();
-        let pending_chats = self.pending_chats.clone();
-        let client = self.client.clone();
-        let ollama_url = self.ollama_url.clone();
-        let model = self.model.clone();
-        let db = self.db.clone();
-        let tools = self.get_tools();
-
-        let handle = thread::spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(mut stream) => {
-                        let mut reader = BufReader::new(&stream);
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).is_ok() {
-                            if let Ok(request) = serde_json::from_str::<AiRequest>(line.trim()) {
-                                let response = Self::handle_request(
-                                    request,
-                                    &pending_confirmations,
-                                    &pending_chats,
-                                    &client,
-                                    &ollama_url,
-                                    &model,
-                                    &db,
-                                    &tools,
-                                );
-                                let response_json = serde_json::to_string(&response).unwrap_or_else(|_| {
-                                    r#"{"type":"Error","message":"Failed to serialize response"}"#.to_string()
-                                });
-                                let _ = stream.write_all(format!("{}\n", response_json).as_bytes());
-                                let _ = stream.flush();
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[ai] Socket accept error: {}", e);
-                    }
-                }
-            }
-        });
-
-        self.listener_handle = Some(handle);
-        Ok(())
-    }
-
-    fn handle_request(
-        request: AiRequest,
-        pending_confirmations: &Arc<Mutex<HashMap<String, ToolCall>>>,
-        pending_chats: &Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
-        client: &reqwest::Client,
-        ollama_url: &str,
-        model: &str,
-        db: &Arc<Mutex<rusqlite::Connection>>,
-        tools: &[Tool],
-    ) -> AiResponse {
+        let cell=self.session(&id)?;
+        let mut session=cell.try_lock().map_err(|_|anyhow::anyhow!("This conversation is busy"))?;
+        session.touched=Some(Instant::now());
         match request {
-            AiRequest::Chat { message, conversation_id } => {
-                let conv_id = conversation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                
-                let mut chats = pending_chats.lock().unwrap();
-                let history = chats.entry(conv_id.clone()).or_insert_with(Vec::new);
-                history.push(ChatMessage { role: "user".to_string(), content: message, tool_calls: None });
-
-                let state = State::default();
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                match rt.block_on(Self::process_chat(history.clone(), &state, client, ollama_url, model, tools, db, pending_confirmations)) {
-                    Ok(response) => {
-                        history.push(ChatMessage { role: "assistant".to_string(), content: response.clone(), tool_calls: None });
-                        AiResponse::Done { summary: Some(response) }
-                    }
-                    Err(e) => {
-                        eprintln!("[ai] process_chat error: {}", e);
-                        AiResponse::Error { message: e.to_string() }
-                    }
-                }
+            Request::Chat{message,..} => {
+                ensure!(session.pending.is_none(),"Confirm or deny the pending action first");
+                ensure!(!message.trim().is_empty() && message.len()<=4096,"Message must contain 1–4096 bytes");
+                self.begin(&id,&mut session)?;
+                session.messages.push(Message::new("user",message));
             }
-            AiRequest::ConfirmTool { tool_call_id, confirmed } => {
-                let mut pending = pending_confirmations.lock().unwrap();
-                if let Some(tool_call) = pending.remove(&tool_call_id) {
-                    if confirmed {
-                        let state = State::default();
-                        let rt = tokio::runtime::Runtime::new().unwrap();
-                        match rt.block_on(Self::execute_tool_static(&tool_call, &state, db)) {
-                            Ok(result) => AiResponse::ToolResult { tool_call_id, result },
-                            Err(e) => AiResponse::Error { message: format!("Tool execution failed: {}", e) },
-                        }
-                    } else {
-                        AiResponse::Error { message: "Tool execution denied by user".to_string() }
-                    }
-                } else {
-                    AiResponse::Error { message: "Unknown tool call ID".to_string() }
+            Request::Voice{..} => {
+                ensure!(session.pending.is_none(),"Confirm or deny the pending action first");
+                let text=self.record(5,"en")?;
+                self.begin(&id,&mut session)?;
+                session.messages.push(Message::new("user",text));
+            }
+            Request::ConfirmTool{tool_call_id,confirmed,..} => {
+                let pending=session.pending.as_ref().context("No pending action in this conversation")?;
+                ensure!(pending.call.id==tool_call_id,"Confirmation does not match this conversation");
+                let pending=session.pending.take().context("Pending action disappeared")?;
+                if pending.created.elapsed()>Duration::from_secs(300) {
+                    session.messages.push(Message::result(&pending.call,"Confirmation expired; action was not executed".into()));
+                    session.messages.clear(); bail!("Confirmation expired; ask again");
                 }
+                let result=if confirmed { self.execute(&pending.call).unwrap_or_else(|error|format!("Tool failed: {error}")) } else {"Denied by the user. Do not retry this action.".into()};
+                session.messages.push(Message::result(&pending.call,result));
+                if let Some(response)=self.run_calls(&id,&mut session,pending.remaining)? {return Ok(response);}
+            }
+        }
+        for _ in 0..MAX_TURNS {
+            let mut answer=self.ask(&session.messages,true).await?;
+            let mut calls=answer.tool_calls.take().unwrap_or_default();
+            for call in &mut calls {call.id=uuid::Uuid::new_v4().to_string();}
+            answer.tool_calls=if calls.is_empty(){None}else{Some(calls.clone())};
+            session.messages.push(answer.clone());
+            if calls.is_empty() {
+                let response=json!({"type":"Done","summary":answer.content,"conversation_id":id});
+                self.save_summary(&id,&session.messages).await;
+                if session.messages.len()>32 { session.messages.clear(); }
+                return Ok(response);
+            }
+            ensure!(calls.len()<=8,"Model requested too many tools");
+            if let Some(response)=self.run_calls(&id,&mut session,calls)? {return Ok(response);}
+        }
+        session.messages.clear();
+        bail!("Stopped after {MAX_TURNS} tool rounds. Please simplify the request.")
+    }
+    fn begin(&self,id:&str,session:&mut Session)->Result<()> {
+        // Each completed user turn can refresh context without losing preceding messages.
+        let state=self.live_state().ok();
+        let metrics=state.map(|s|format!("CPU {:.0}%, memory {:.0}%, battery {:.0}%",s.cpu.usage,s.memory.used_percent,s.battery.percent)).unwrap_or_else(||"Metrics unavailable; do not invent readings".into());
+        let prompt=format!("You are MIKO, a concise local desktop assistant. Use only the supplied tools. Never invent successful actions. Mutating desktop tools require user confirmation. Current metrics: {metrics}. Current local time: {}.",chrono::Local::now());
+        if session.messages.is_empty() {
+            session.messages.push(Message::new("system",prompt));
+            let summary=self.db.lock().map_err(|_|anyhow::anyhow!("Memory unavailable"))?.query_row("SELECT summary FROM conversation_summaries WHERE conversation_id=?",[id],|row|row.get::<_,String>(0)).ok();
+            if let Some(summary)=summary {session.messages.push(Message::new("user",format!("Previous conversation summary (context only): {summary}")));}
+        } else { session.messages[0]=Message::new("system",prompt); }
+        Ok(())
+    }
+    fn run_calls(&self,id:&str,session:&mut Session,calls:Vec<ToolCall>)->Result<Option<Value>> {
+        let mut iter=calls.into_iter();
+        while let Some(call)=iter.next() {
+            if requires_confirmation(&call.function.name) {
+                let response=json!({"type":"ToolCall","tool_call":call,"conversation_id":id});
+                session.pending=Some(Pending{call,remaining:iter.collect(),created:Instant::now()});
+                return Ok(Some(response));
+            }
+            let result=self.execute(&call).unwrap_or_else(|error|format!("Tool failed: {error}"));
+            session.messages.push(Message::result(&call,result));
+        }
+        Ok(None)
+    }
+    async fn save_summary(&self,id:&str,messages:&[Message]) {
+        let mut context=messages.to_vec();
+        context.push(Message::new("user","Summarize this exchange in one short sentence for future context. Do not call tools."));
+        if let Ok(Ok(summary))=tokio::time::timeout(Duration::from_secs(12),self.ask(&context,false)).await {
+            let text=summary.content.chars().take(1000).collect::<String>();
+            if let Ok(db)=self.db.lock() {
+                let _=db.execute("INSERT INTO conversation_summaries VALUES(?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET summary=excluded.summary,updated_at=excluded.updated_at",rusqlite::params![id,text,chrono::Utc::now().timestamp()]);
+                let _=db.execute("DELETE FROM conversation_summaries WHERE conversation_id NOT IN (SELECT conversation_id FROM conversation_summaries ORDER BY updated_at DESC LIMIT 128)",[]);
             }
         }
     }
-
-    async fn process_chat(
-        messages: Vec<ChatMessage>,
-        state: &State,
-        client: &reqwest::Client,
-        ollama_url: &str,
-        model: &str,
-        tools: &[Tool],
-        db: &Arc<Mutex<rusqlite::Connection>>,
-        pending_confirmations: &Arc<Mutex<HashMap<String, ToolCall>>>,
-    ) -> Result<String> {
-        let system_prompt = format!(
-            "You are MIKO, an AI assistant integrated into the SamOS Linux desktop environment. \
-             You have access to system information and can control the desktop. \
-             Use tools when appropriate. Be concise and helpful.\n\n\
-             Current system state: CPU {:.1}%, RAM {:.1}%, Battery {}% ({}), Disk {:.1}%",
-            state.cpu.usage,
-            state.memory.used_percent,
-            state.battery.percent,
-            state.battery.status,
-            state.disk.used_percent
-        );
-
-        let mut full_messages = vec![
-            ChatMessage { role: "system".to_string(), content: system_prompt, tool_calls: None },
-        ];
-        full_messages.extend(messages);
-
-        let request = OllamaChatRequest {
-            model: model.to_string(),
-            messages: full_messages,
-            tools: Some(tools.to_vec()),
-            stream: false,
-        };
-
-        let response = client
-            .post(&format!("{}/api/chat", ollama_url))
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let err = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama error: {}", err));
-        }
-
-        let response_text = response.text().await?;
-        eprintln!("[ai] Ollama response: {}", response_text);
-        let chat_response: OllamaChatResponse = serde_json::from_str(&response_text)?;
-
-        let tool_calls = chat_response.message.tool_calls.clone();
-        let message_content = chat_response.message.content.clone();
-
-        if let Some(tool_calls) = tool_calls {
-            for tool_call in tool_calls {
-                if tool_call.function.name == "launch_app"
-                    || tool_call.function.name == "switch_workspace"
-                    || tool_call.function.name == "set_theme"
-                {
-                    pending_confirmations.lock().unwrap()
-                        .insert(tool_call.id.clone(), tool_call.clone());
-                    return Ok(format!("CONFIRMATION_REQUIRED:{}", tool_call.id));
-                }
-
-                let result = Self::execute_tool_static(&tool_call, state, db).await?;
-                return Box::pin(Self::process_chat(vec![
-                    ChatMessage {
-                        role: "assistant".to_string(),
-                        content: message_content.clone(),
-                        tool_calls: None,
-                    },
-                    ChatMessage {
-                        role: "tool".to_string(),
-                        content: result,
-                        tool_calls: None,
-                    },
-                ], state, client, ollama_url, model, tools, db, pending_confirmations)).await;
+    fn execute(&self,call:&ToolCall)->Result<String> {
+        let args=&call.function.arguments;
+        match call.function.name.as_str() {
+            "get_system_state"=>Ok(serde_json::to_string(&self.live_state()?)?),
+            "launch_app"=>{
+                let app=text_arg(args,"app_name")?;
+                ensure!(app.len()<=200 && app.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b)) && !app.starts_with('-'),"Use a desktop application ID, not a command");
+                crate::process::run("gtk-launch",&[app],None,8)?; Ok(format!("Launched {app}"))
             }
+            "switch_workspace"=>{
+                let id=args["workspace_id"].as_i64().context("workspace_id must be an integer")?;
+                ensure!((1..=1000).contains(&id),"Workspace must be 1–1000");
+                crate::process::run("hyprctl",&["dispatch","workspace",&id.to_string()],None,5)
+            }
+            "set_theme"=>{
+                let name=text_arg(args,"theme")?; crate::config::validate_name(name)?;
+                ensure!(self.home.join(".config/samos/themes").join(format!("{name}.toml")).is_file(),"Theme not found");
+                crate::config::set_theme_at(&self.home.join(".config/samos/config.toml"),name)?;
+                Ok(format!("Theme set to {name}"))
+            }
+            "add_reminder"=>{
+                let text=text_arg(args,"text")?; ensure!(text.len()<=2000,"Reminder too long");
+                let due=if args["due_at"].is_null(){None}else{Some(args["due_at"].as_i64().context("due_at must be a Unix timestamp")?)};
+                self.db.lock().map_err(|_|anyhow::anyhow!("Memory unavailable"))?.execute("INSERT INTO reminders(text,due_at,created_at) VALUES(?,?,?)",rusqlite::params![text,due,chrono::Utc::now().timestamp()])?;
+                Ok(format!("Saved reminder: {text}"))
+            }
+            "list_reminders"=>{
+                let db=self.db.lock().map_err(|_|anyhow::anyhow!("Memory unavailable"))?;
+                let mut stmt=db.prepare("SELECT id,text,due_at FROM reminders ORDER BY created_at DESC LIMIT 100")?;
+                let rows=stmt.query_map([],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"text":row.get::<_,String>(1)?,"due_at":row.get::<_,Option<i64>>(2)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+                Ok(serde_json::to_string(&rows)?)
+            }
+            "stt_transcribe"=>self.transcribe(Path::new(text_arg(args,"audio_file")?),args["language"].as_str().unwrap_or("en")),
+            "stt_record_and_transcribe"=>self.record(args["duration_seconds"].as_u64().unwrap_or(5),args["language"].as_str().unwrap_or("en")),
+            "tts_speak"=>self.speak(text_arg(args,"text")?,args["voice"].as_str().unwrap_or("en_US-lessac-medium")),
+            other=>bail!("Unknown tool: {other}"),
         }
-
-        Ok(message_content)
     }
-
-    async fn execute_tool_static(
-        tool_call: &ToolCall,
-        state: &State,
-        db: &Arc<Mutex<rusqlite::Connection>>,
-    ) -> Result<String> {
-        let args: Value = tool_call.function.arguments.clone();
-
-        match tool_call.function.name.as_str() {
-            "get_system_state" => Ok(format!(
-                "CPU: {:.1}%, RAM: {:.1}%, Battery: {:.0}% ({}), Disk: {:.1}%, Net: {}KB ↑{}KB, Temp: {:.1}°C",
-                state.cpu.usage,
-                state.memory.used_percent,
-                state.battery.percent,
-                state.battery.status,
-                state.disk.used_percent,
-                state.network.rx_kb,
-                state.network.tx_kb,
-                state.temperature.celsius
-            )),
-            "launch_app" => {
-                let app_name = args.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
-                let output = std::process::Command::new("sh")
-                    .args(["-c", &format!("gtk-launch {} 2>/dev/null || echo 'failed'", app_name)])
-                    .output()?;
-                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-            }
-            "switch_workspace" => {
-                let workspace_id = args.get("workspace_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                let output = std::process::Command::new("hyprctl")
-                    .args(["dispatch", "workspace", &workspace_id.to_string()])
-                    .output()?;
-                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-            }
-            "set_theme" => {
-                let theme = args.get("theme").and_then(|v| v.as_str()).unwrap_or("");
-                let home = std::env::var("HOME").unwrap_or_default();
-                eprintln!("[ai] Setting theme to: {}", theme);
-                
-                let config_path = std::path::PathBuf::from(&home).join(".config/samos/config.toml");
-                let theme_path = std::path::PathBuf::from(&home)
-                    .join(".config/samos/themes")
-                    .join(format!("{}.toml", theme));
-
-                if !theme_path.exists() {
-                    return Ok(format!("Theme '{}' not found", theme));
-                }
-
-                let config = format!(
-                    "theme = \"{}\"\nmonitor = \"focused\"\nrefresh_ms = 1000\n",
-                    theme
-                );
-
-                if let Err(e) = std::fs::write(&config_path, config) {
-                    return Ok(format!("Failed to write config: {}", e));
-                }
-
-                // Generate theme SCSS variables
-                let _ = std::process::Command::new("sh")
-                    .args(["-c", &format!("~/.config/eww/scripts/theme_switch.sh {}", theme)])
-                    .output();
-
-                // Reload Eww to apply new theme
-                let _ = std::process::Command::new("eww")
-                    .args(["reload"])
-                    .output();
-
-                Ok(format!("Theme set to: {}", theme))
-            }
-            "add_reminder" => {
-                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let due_at = args.get("due_at").and_then(|v| v.as_i64());
-                let conn = db.lock().unwrap();
-                let created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs() as i64;
-                conn.execute(
-                    "INSERT INTO reminders (text, due_at, created_at) VALUES (?, ?, ?)",
-                    rusqlite::params![text, due_at, created_at],
-                )?;
-                Ok(format!("Reminder added: {}", text))
-            }
-            "list_reminders" => {
-                let conn = db.lock().unwrap();
-                let mut stmt = conn.prepare(
-                    "SELECT id, text, due_at FROM reminders ORDER BY created_at DESC"
-                )?;
-                let reminders: Vec<String> = stmt.query_map([], |row| {
-                    let id: i64 = row.get(0)?;
-                    let text: String = row.get(1)?;
-                    let due_at: Option<i64> = row.get(2)?;
-                    let due_str = due_at.map(|d| format!(" (due: {})",
-                        chrono::DateTime::from_timestamp(d, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| d.to_string())
-                    )).unwrap_or_default();
-                    Ok(format!("[{}] {}{}", id, text, due_str))
-                })?.collect::<Result<Vec<_>, _>>()?;
-                if reminders.is_empty() { Ok("No reminders".to_string()) }
-                else { Ok(reminders.join("\n")) }
-            }
-            _ => Ok(format!("Unknown tool: {}", tool_call.function.name)),
-        }
+    fn binary(&self,name:&str)->String {
+        let path=self.home.join(".local/bin").join(name);
+        if path.is_file(){path.to_string_lossy().into_owned()}else{name.into()}
+    }
+    fn transcribe(&self,path:&Path,language:&str)->Result<String> {
+        ensure!(path.is_file(),"Audio file not found");
+        ensure!(language.len()<=8&&language.bytes().all(|b|b.is_ascii_alphabetic()||b==b'-'),"Invalid language");
+        let model=self.home.join(".local/share/whisper.cpp/models/ggml-base.bin");
+        ensure!(model.is_file(),"Whisper model is not installed");
+        crate::process::run(&self.binary("whisper-cli"),&["-m",&model.to_string_lossy(),"-f",&path.to_string_lossy(),"-l",language,"-nt"],None,60)
+    }
+    fn record(&self,duration:u64,language:&str)->Result<String> {
+        ensure!((1..=30).contains(&duration),"Recording duration must be 1–30 seconds");
+        let temp=AudioTemp::new()?;
+        crate::process::run("arecord",&["-q","-f","S16_LE","-c","1","-r","16000","-d",&duration.to_string(),&temp.file.to_string_lossy()],None,duration+5)?;
+        self.transcribe(&temp.file,language)
+    }
+    fn speak(&self,text:&str,voice:&str)->Result<String> {
+        ensure!(text.len()<=4000,"Speech text too long"); crate::config::validate_name(voice)?;
+        let model=self.home.join(".local/share/piper/voices").join(format!("{voice}.onnx"));
+        ensure!(model.is_file(),"Piper voice is not installed");
+        let temp=AudioTemp::new()?;
+        let env_espeak=format!("ESPEAK_DATA_PATH={}",self.home.join(".local/share/espeak-ng-data").display());
+        let env_lib=format!("LD_LIBRARY_PATH={}:{}",self.home.join(".local/lib").display(),std::env::var("LD_LIBRARY_PATH").unwrap_or_default());
+        crate::process::run("env",&[&env_espeak,&env_lib,&self.binary("piper"),"--model",&model.to_string_lossy(),"--output_file",&temp.file.to_string_lossy()],Some(text),60)?;
+        crate::process::run("aplay",&["-q",&temp.file.to_string_lossy()],None,90)?;
+        Ok("Speech played".into())
     }
 }
+struct AudioTemp { directory:PathBuf, file:PathBuf }
+impl AudioTemp {
+    fn new()->Result<Self>{
+        let directory=std::env::temp_dir().join(format!("samos-audio-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory)?;std::fs::set_permissions(&directory,std::fs::Permissions::from_mode(0o700))?;
+        Ok(Self{file:directory.join("audio.wav"),directory})
+    }
+}
+impl Drop for AudioTemp {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.directory);}}
+fn text_arg<'a>(args:&'a Value,key:&str)->Result<&'a str>{
+    args[key].as_str().filter(|s|!s.trim().is_empty()).with_context(||format!("{key} must be a nonempty string"))
+}
+fn requires_confirmation(name:&str)->bool {
+    matches!(name,"launch_app"|"switch_workspace"|"set_theme"|"stt_record_and_transcribe"|"tts_speak")
+}
+fn tool_definitions()->Vec<Value>{
+    let definitions=[
+        ("get_system_state","Read live system metrics",json!({}),vec![]),
+        ("launch_app","Launch a desktop application ID; requires confirmation",json!({"app_name":{"type":"string"}}),vec!["app_name"]),
+        ("switch_workspace","Switch workspace; requires confirmation",json!({"workspace_id":{"type":"integer"}}),vec!["workspace_id"]),
+        ("set_theme","Set a theme; requires confirmation",json!({"theme":{"type":"string"}}),vec!["theme"]),
+        ("add_reminder","Save a reminder with an optional Unix due timestamp",json!({"text":{"type":"string"},"due_at":{"type":"integer"}}),vec!["text"]),
+        ("list_reminders","List saved reminders",json!({}),vec![]),
+        ("stt_transcribe","Transcribe a local audio file",json!({"audio_file":{"type":"string"},"language":{"type":"string"}}),vec!["audio_file"]),
+        ("stt_record_and_transcribe","Record 1–30 seconds from the microphone; requires confirmation",json!({"duration_seconds":{"type":"integer"},"language":{"type":"string"}}),vec![]),
+        ("tts_speak","Speak text locally; requires confirmation",json!({"text":{"type":"string"},"voice":{"type":"string"}}),vec!["text"]),
+    ];
+    definitions.into_iter().map(|(name,description,properties,required)|json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required}}})).collect()
+}
 
+/// Local AI socket module. Tool operations are handled outside metric polling.
+pub struct AiModule { assistant:Arc<Assistant>, stop:Arc<AtomicBool>, handle:Option<thread::JoinHandle<()>>, socket:PathBuf }
+impl AiModule {
+    /// Open persistent local memory; inference remains request driven.
+    pub fn new()->Result<Self>{
+        let home=PathBuf::from(std::env::var("HOME")?);
+        let socket=home.join(".local/state/samos/ai.sock");
+        Ok(Self{assistant:Arc::new(Assistant::new(home,"http://localhost:11434".into())?),stop:Arc::new(AtomicBool::new(false)),handle:None,socket})
+    }
+}
 impl Module for AiModule {
-    fn name(&self) -> &'static str {
-        "ai"
-    }
-
-    fn init(&mut self) -> Result<()> {
-        self.start_socket_listener()?;
-        Ok(())
-    }
-
-    fn update(&mut self, state: &mut State) -> Result<()> {
-        state.ai.status = "ready".to_string();
-        state.ai.model = self.model.clone();
-        Ok(())
-    }
-
-    fn shutdown(&mut self) -> Result<()> {
-        if let Some(handle) = self.listener_handle.take() {
-            let _ = handle.join();
+    fn name(&self)->&'static str{"ai"}
+    fn init(&mut self)->Result<()>{
+        if self.socket.exists(){
+            ensure!(UnixStream::connect(&self.socket).is_err(),"AI socket already has an active server");
+            std::fs::remove_file(&self.socket)?;
         }
-        let _ = std::fs::remove_file(&self.socket_path);
-        Ok(())
+        let listener=UnixListener::bind(&self.socket)?;
+        std::fs::set_permissions(&self.socket,std::fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        let assistant=self.assistant.clone();let stop=self.stop.clone();
+        self.handle=Some(thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed){
+                match listener.accept(){
+                    Ok((mut stream,_))=>{
+                        if assistant.busy.fetch_add(1,Ordering::SeqCst)>=4 {assistant.busy.fetch_sub(1,Ordering::SeqCst);let _=stream.write_all(b"{\"type\":\"Error\",\"message\":\"Assistant busy; retry shortly\"}\n");continue;}
+                        let assistant=assistant.clone();
+                        thread::spawn(move || {
+                            let result=(||->Result<Value>{
+                                stream.set_read_timeout(Some(Duration::from_secs(5)))?;stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                                let mut line=String::new();BufReader::new((&stream).take(16_385)).read_line(&mut line)?;
+                                ensure!(line.len()<=16_384 && line.ends_with('\n'),"Request must be newline terminated and at most 16 KiB");
+                                let request=serde_json::from_str(&line)?;
+                                let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                                runtime.block_on(async {tokio::time::timeout(Duration::from_secs(150),assistant.handle(request)).await.context("Assistant request timed out")?})
+                            })();
+                            if let Ok(mut health)=assistant.health.lock(){*health=if result.is_ok(){"idle"}else{"error"}.into();}
+                            let response=result.unwrap_or_else(|e|json!({"type":"Error","message":e.to_string()}));
+                            let _=writeln!(stream,"{response}");assistant.busy.fetch_sub(1,Ordering::SeqCst);
+                        });
+                    }
+                    Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>thread::sleep(Duration::from_millis(50)),
+                    Err(error)=>{eprintln!("[ai] Listener error: {error}");thread::sleep(Duration::from_millis(100));}
+                }
+            }
+        }));Ok(())
+    }
+    fn update(&mut self,state:&mut State)->Result<()>{
+        state.ai.model=MODEL.into();state.ai.status=if self.assistant.busy.load(Ordering::Relaxed)>0{"busy".into()}else{self.assistant.health.lock().map(|s|s.clone()).unwrap_or_else(|_|"error".into())};Ok(())
+    }
+    fn shutdown(&mut self)->Result<()>{
+        self.stop.store(true,Ordering::Relaxed);if let Some(handle)=self.handle.take(){let _=handle.join();}let _=std::fs::remove_file(&self.socket);Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn native_tool_call_needs_no_id(){let call:ToolCall=serde_json::from_value(json!({"function":{"name":"get_system_state","arguments":{}}})).unwrap();assert!(call.id.is_empty());}
+    #[test] fn sensitive_actions_are_gated(){for name in ["launch_app","switch_workspace","set_theme","tts_speak","stt_record_and_transcribe"]{assert!(requires_confirmation(name));}assert!(!requires_confirmation("get_system_state"));}
+    #[test] fn voice_tools_are_registered(){let tools=tool_definitions();assert_eq!(tools.len(),9);assert!(tools.iter().any(|t|t["function"]["name"]=="stt_transcribe"));}
+
+    #[test] fn confirmation_preserves_tool_order_and_exact_arguments(){
+        let home=std::env::temp_dir().join(format!("samos-ai-test-{}",uuid::Uuid::new_v4()));
+        let assistant=Assistant::new(home.clone(),"http://localhost:1".into()).unwrap();
+        let mut session=Session::default();
+        session.messages.push(Message::new("user","Launch Firefox and switch workspace"));
+        let calls=vec![ToolCall{id:"first".into(),function:Function{name:"launch_app".into(),arguments:json!({"app_name":"firefox"})}},ToolCall{id:"second".into(),function:Function{name:"switch_workspace".into(),arguments:json!({"workspace_id":2})}}];
+        let response=assistant.run_calls("test",&mut session,calls).unwrap().unwrap();
+        assert_eq!(response["tool_call"]["function"]["arguments"]["app_name"],"firefox");
+        assert_eq!(session.pending.as_ref().unwrap().remaining[0].id,"second");
+        assert_eq!(session.messages[0].content,"Launch Firefox and switch workspace");
+        drop(assistant);std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test] fn launch_rejects_shell_fragments_before_execution(){
+        let home=std::env::temp_dir().join(format!("samos-ai-test-{}",uuid::Uuid::new_v4()));
+        let assistant=Assistant::new(home.clone(),"http://localhost:1".into()).unwrap();
+        let call=ToolCall{id:String::new(),function:Function{name:"launch_app".into(),arguments:json!({"app_name":"firefox; touch /tmp/not-executed"})}};
+        assert!(assistant.execute(&call).unwrap_err().to_string().contains("application ID"));
+        drop(assistant);std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test] fn system_tool_reads_exported_metrics(){
+        let home=std::env::temp_dir().join(format!("samos-ai-test-{}",uuid::Uuid::new_v4()));
+        let assistant=Assistant::new(home.clone(),"http://localhost:1".into()).unwrap();
+        let mut state=State::default();state.cpu.usage=37.5;
+        std::fs::write(home.join(".local/state/samos/state.json"),serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(assistant.live_state().unwrap().cpu.usage,37.5);
+        drop(assistant);std::fs::remove_dir_all(home).unwrap();
     }
 }

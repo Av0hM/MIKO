@@ -1,6 +1,5 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 use toml;
@@ -44,34 +43,32 @@ fn main() -> Result<()> {
 }
 
 fn toggle_wifi() -> Result<()> {
-    let output = std::process::Command::new("nmcli")
+    let output = std::process::Command::new("timeout").args(["8s", "nmcli"]).env("LC_ALL", "C")
         .args(["radio", "wifi"])
         .output()?;
 
+    ensure!(output.status.success(), "Status query failed: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let enabled = stdout == "enabled";
     let new_state = !enabled;
 
-    std::process::Command::new("nmcli")
-        .args(["radio", "wifi", if new_state { "on" } else { "off" }])
-        .output()?;
+    checked("nmcli", &["radio", "wifi", if new_state { "on" } else { "off" }])?;
 
     println!("WiFi: {}", if new_state { "enabled" } else { "disabled" });
     Ok(())
 }
 
 fn toggle_bluetooth() -> Result<()> {
-    let output = std::process::Command::new("bluetoothctl")
+    let output = std::process::Command::new("timeout").args(["8s", "bluetoothctl"]).env("LC_ALL", "C")
         .args(["show"])
         .output()?;
 
+    ensure!(output.status.success(), "Status query failed: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let powered = stdout.lines().any(|l| l.trim().starts_with("Powered: yes"));
     let new_state = !powered;
 
-    std::process::Command::new("bluetoothctl")
-        .args(["power", if new_state { "on" } else { "off" }])
-        .output()?;
+    checked("bluetoothctl", &["power", if new_state { "on" } else { "off" }])?;
 
     println!(
         "Bluetooth: {}",
@@ -81,9 +78,8 @@ fn toggle_bluetooth() -> Result<()> {
 }
 
 fn set_power_profile(profile: &str) -> Result<()> {
-    std::process::Command::new("powerprofilesctl")
-        .args(["set", profile])
-        .output()?;
+    ensure!(["balanced", "power-saver", "performance"].contains(&profile), "Invalid power profile");
+    checked("powerprofilesctl", &["set", profile])?;
 
     println!("Power profile set to: {}", profile);
     Ok(())
@@ -125,52 +121,18 @@ fn theme_list() -> Result<()> {
     Ok(())
 }
 
-#[derive(Serialize)]
-struct ConfigToml {
-    theme: String,
-    monitor: String,
-    refresh_ms: u64,
+fn theme_set(theme: &str) -> Result<()> {
+    samos_core::config::validate_name(theme)?;
+    let home = std::env::var("HOME")?;
+    let theme_path = PathBuf::from(home).join(".config/samos/themes").join(format!("{theme}.toml"));
+    ensure!(theme_path.is_file(), "Theme '{theme}' not found");
+    samos_core::config::set_theme_at(&samos_core::config::Config::path()?, theme)?;
+    println!("Theme set to: {theme}");
+    Ok(())
 }
 
-fn theme_set(theme: &str) -> Result<()> {
-    let home = std::env::var("HOME")?;
-    let config_path = PathBuf::from(&home).join(".config/samos/config.toml");
-    let theme_path = PathBuf::from(&home)
-        .join(".config/samos/themes")
-        .join(format!("{}.toml", theme));
-
-    if !theme_path.exists() {
-        eprintln!("Theme '{}' not found", theme);
-        return Ok(());
-    }
-
-    let config = ConfigToml {
-        theme: theme.to_string(),
-        monitor: "focused".to_string(),
-        refresh_ms: 1000,
-    };
-
-    fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    println!("Theme set to: {}", theme);
-
-    // Restart samosd to pick up new theme
-    std::process::Command::new("systemctl")
-        .args(["--user", "restart", "samosd.service"])
-        .output()?;
-
-    // Generate theme SCSS variables
-    std::process::Command::new("sh")
-        .args([
-            "-c",
-            &format!("~/.config/eww/scripts/theme_switch.sh {}", theme),
-        ])
-        .output()?;
-
-    // Reload Eww to apply new theme
-    std::process::Command::new("eww")
-        .args(["reload"])
-        .output()?;
-
-    println!("Theme applied and services reloaded");
+fn checked(program: &str, args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("timeout").args(["8s", program]).args(args).env("LC_ALL", "C").output()?;
+    ensure!(output.status.success(), "{program} failed: {}", String::from_utf8_lossy(&output.stderr));
     Ok(())
 }

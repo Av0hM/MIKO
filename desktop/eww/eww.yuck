@@ -1,0 +1,112 @@
+(defpoll live :interval "1s" :initial "{\"online\": false, \"theme\": \"hud\", \"cpu\": {\"usage\": 0}, \"memory\": {\"used_percent\": 0}, \"battery\": {\"percent\": 0}, \"temperature\": {\"celsius\": 0}, \"system\": {\"hostname\": \"Connecting\\u2026\", \"kernel\": \"Linux\"}, \"workspace\": {\"workspaces\": []}, \"control\": {\"wifi_enabled\": false, \"wifi_ssid\": \"\", \"bluetooth_enabled\": false, \"power_profile\": \"unknown\"}, \"visualizer\": {\"now_playing_title\": \"\", \"now_playing_artist\": \"\", \"now_playing_status\": \"Stopped\"}}" "/usr/bin/python3 scripts/desktop.py state")
+(defpoll clock :interval "1s" :initial "{}" "/usr/bin/python3 scripts/desktop.py clock")
+(defpoll chat :interval "500ms" :initial "{\"user\": \"\", \"reply\": \"Ask about your system, open an app, or save a reminder.\", \"busy\": false, \"pending\": \"\", \"action\": \"\"}" "/usr/bin/python3 scripts/desktop.py chat-state")
+(deflisten spectrum :initial "[]" "/usr/bin/python3 scripts/desktop.py spectrum")
+
+(defwidget eyebrow [text]
+  (label :show-truncated false :class "eyebrow" :halign "start" :text text))
+(defwidget metric [name value suffix]
+  (box :class "metric" :orientation "v" :space-evenly false :spacing 8
+    (label :show-truncated false :class "metric-name" :halign "start" :text name)
+    (box :space-evenly false :spacing 3
+      (label :class "metric-value" :text {round(value, 0)})
+      (label :class "metric-unit" :valign "end" :text suffix))
+    (progress :value value)))
+(defwidget identity []
+  (box :class "card identity" :orientation "v" :space-evenly false :spacing 22
+    (box :space-evenly false
+      (box :orientation "v" :space-evenly false :spacing 6 :hexpand true
+        (eyebrow :text "S A M O S   /   D E S K T O P")
+        (label :class "greeting" :halign "start" :text {clock.greeting ?: "Welcome back."}))
+      (label :class "status-dot" :text "●" :tooltip {live.online ? "System connected" : "Waiting for samosd"}))
+    (box :spacing 18
+      (metric :name "PROCESSOR" :value {live.cpu.usage ?: 0} :suffix "%")
+      (metric :name "MEMORY" :value {live.memory.used_percent ?: 0} :suffix "%")
+      (metric :name "BATTERY" :value {live.battery.percent ?: 0} :suffix "%"))
+    (box :class "divider" :height 1)
+    (box :space-evenly false
+      (label :class "subtle" :hexpand true :halign "start" :text {live.system.hostname ?: "Connecting…"})
+      (label :class "subtle" :text "${round(live.temperature.celsius ?: 0, 0)}°C  /  ${live.system.kernel ?: 'Linux'}"))
+    (box :orientation "v" :space-evenly false :spacing 10
+      (eyebrow :text "YOUR SPACES")
+      (box :space-evenly false :spacing 8
+        (for ws in {live.workspace.workspaces ?: []}
+          (button :class {ws.active ? "workspace active" : "workspace"}
+            :onclick "/usr/bin/python3 scripts/desktop.py workspace ${ws.id}"
+            :tooltip "${ws.windows} windows · ${ws.monitor}"
+            (label :text {ws.id})))))))
+(defwidget clock-panel []
+  (box :class "card clock-card" :orientation "v" :space-evenly false :spacing 14
+    (eyebrow :text {clock.date ?: "TODAY"})
+    (box :space-evenly false :spacing 8
+      (label :class "clock" :text {clock.time ?: "00:00"})
+      (label :class "seconds" :valign "end" :text {clock.seconds ?: "00"}))
+    (label :class "subtle" :halign "start" :text "A little space to think.")
+    (box :class "divider" :height 1)
+    (box :visible {(live.theme == "hud") || (live.theme == "hacker")} :spacing 8
+      (button :class {live.control.wifi_enabled ? "chip enabled" : "chip"}
+        :onclick "/usr/bin/python3 scripts/desktop.py control wifi-toggle &"
+        :tooltip {live.control.wifi_ssid ?: "Wi-Fi"} "Wi-Fi")
+      (button :class {live.control.bluetooth_enabled ? "chip enabled" : "chip"}
+        :onclick "/usr/bin/python3 scripts/desktop.py control bluetooth-toggle &" "Bluetooth")
+      (button :class "chip" :onclick "/usr/bin/python3 scripts/desktop.py profile &"
+        :tooltip {live.control.power_profile ?: "Power profile"} "Power"))))
+(defwidget player []
+  (box :class "card player" :orientation "v" :space-evenly false :spacing 18
+    (box :space-evenly false :spacing 14
+      (image :path "assets/record.svg" :image-width 64 :image-height 64)
+      (box :orientation "v" :space-evenly false :spacing 7 :hexpand true
+        (eyebrow :text {live.visualizer.now_playing_status == "Playing" ? "ON THE AIR" : "YOUR SOUNDTRACK"})
+        (label :class "track" :halign "start" :limit-width 27 :text {live.visualizer.now_playing_title != "" ? live.visualizer.now_playing_title : "A moment of quiet"})
+        (label :class "subtle" :halign "start" :limit-width 32 :text {live.visualizer.now_playing_artist != "" ? live.visualizer.now_playing_artist : "Play music in your favorite app"})))
+    (box :space-evenly false :spacing 10
+      (label :class "subtle" :hexpand true :halign "start" :text {live.visualizer.now_playing_status ?: "Stopped"})
+      (button :class "transport" :onclick "/usr/bin/python3 scripts/desktop.py media previous &" "‹")
+      (button :class "transport primary" :onclick "/usr/bin/python3 scripts/desktop.py media play-pause &"
+        {live.visualizer.now_playing_status == "Playing" ? "Ⅱ" : "▶"})
+      (button :class "transport" :onclick "/usr/bin/python3 scripts/desktop.py media next &" "›"))))
+(defwidget miko []
+  (box :class "card miko" :orientation "v" :space-evenly false :spacing 14
+    (box :space-evenly false
+      (label :class "miko-name" :hexpand true :halign "start" :text "miko")
+      (label :show-truncated false :class "badge" :text {chat.busy ? "THINKING" : "LOCAL ASSISTANT"}))
+    (label :class "subtle" :halign "start" :wrap true :text "A helping hand, right here.")
+    (label :class "user-message" :visible {chat.user != ""} :halign "end" :wrap true :width 290 :show-truncated false :text {chat.user ?: ""})
+    (scroll :height 110 :hscroll false :vscroll true
+      (label :class "reply" :halign "start" :valign "start" :wrap true :width 300 :show-truncated false
+        :text {chat.reply ?: "Ask about your system, open an app, or save a reminder."}))
+    (box :visible {chat.pending != ""} :orientation "v" :space-evenly false :spacing 10
+      (label :class "confirmation" :wrap true :width 300 :show-truncated false :text {chat.action ?: ""})
+      (box :spacing 10
+        (button :class "chip" :onclick "/usr/bin/python3 scripts/desktop.py confirm no &" "Deny")
+        (button :class "chip primary" :onclick "/usr/bin/python3 scripts/desktop.py confirm yes &" "Confirm")))
+    (box :space-evenly false :spacing 10
+      (button :class "compose" :hexpand true :active {!chat.busy} :onclick "/usr/bin/python3 scripts/desktop.py compose &" "Ask miko…  ↗")
+      (button :class "chip" :active {!chat.busy} :tooltip "Record 5 seconds, then send the transcript" :onclick "/usr/bin/python3 scripts/desktop.py voice &" "Mic"))))
+(defwidget audio-floor []
+  (box :class "audio-floor" :orientation "v" :space-evenly false :spacing 0
+    (box :height 76 :valign "end" :spacing 4 :space-evenly true
+      (for h in spectrum
+        (box :class "frequency" :valign "end" :height {h > 3 ? round(h * 0.72, 0) : 2})))
+    (box :class "horizon" :height 1)))
+
+(defwindow samos_identity [screen]
+  :monitor screen :geometry (geometry :x "32px" :y "58px" :width "390px" :height "300px" :anchor "top left")
+  :stacking "bottom" :exclusive false :focusable false :namespace "samos-desktop"
+  (identity))
+(defwindow samos_clock [screen]
+  :monitor screen :geometry (geometry :x "32px" :y "58px" :width "340px" :height "240px" :anchor "top right")
+  :stacking "bottom" :exclusive false :focusable false :namespace "samos-desktop"
+  (clock-panel))
+(defwindow samos_player [screen]
+  :monitor screen :geometry (geometry :x "32px" :y "106px" :width "390px" :height "180px" :anchor "bottom left")
+  :stacking "bottom" :exclusive false :focusable false :namespace "samos-desktop"
+  (player))
+(defwindow samos_miko [screen]
+  :monitor screen :geometry (geometry :x "32px" :y "106px" :width "370px" :height "350px" :anchor "bottom right")
+  :stacking "bottom" :exclusive false :focusable false :namespace "samos-desktop"
+  (miko))
+(defwindow samos_spectrum [screen]
+  :monitor screen :geometry (geometry :width "96%" :height "78px" :anchor "bottom center")
+  :stacking "bottom" :exclusive false :focusable false :namespace "samos-spectrum"
+  (audio-floor))
