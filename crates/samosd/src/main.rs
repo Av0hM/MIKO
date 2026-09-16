@@ -7,7 +7,7 @@ use anyhow::Result;
 use chrono::Local;
 use samos_core::{
     config::Config,
-    modules::{init_global_plugin_manager, shutdown_global_plugins, update_global_plugins},
+    modules::{init_global_plugin_manager, update_global_plugins},
     state::State,
 };
 use sysinfo::System;

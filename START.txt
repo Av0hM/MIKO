@@ -1,0 +1,3 @@
+systemctl --user restart samosd.service
+python3 install/install.py --activate [Project root se]
+systemctl --user status samosd samos-desktop samos-ollama
