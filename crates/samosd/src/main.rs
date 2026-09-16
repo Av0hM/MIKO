@@ -18,12 +18,11 @@ async fn main() -> Result<()> {
     println!("SamOS daemon started");
 
     let config_path = Config::path()?;
-    let mut config = Config::load(&config_path).unwrap_or_else(|e| { eprintln!("[config] {e}; starting with defaults"); Config::default() });
-    let mut ipc_server = ipc::StateIpcServer::new()?;
+    let mut config = Config::load(&config_path)?;
 
     // Initialize plugin manager
     let plugin_dir = std::env::var("HOME").unwrap_or_default() + "/.local/lib/samos/plugins";
-    if let Err(error) = init_global_plugin_manager(&plugin_dir) { eprintln!("[plugin] Plugin loading unavailable: {error}"); }
+    init_global_plugin_manager(&plugin_dir)?;
 
     let mut manager = module_manager::ModuleManager::new();
     manager.register(modules::cpu::CpuModule::new());
@@ -36,10 +35,10 @@ async fn main() -> Result<()> {
     manager.register(modules::workspace::WorkspaceModule::new()?);
     manager.register(modules::automation::AutomationModule::new()?);
     manager.register(modules::visualizer::VisualizerModule::new()?);
-    match modules::ai::AiModule::new() { Ok(module) => manager.register(module), Err(error) => eprintln!("[ai] Disabled: {error}") }
+    manager.register(modules::ai::AiModule::new()?);
     manager.init()?;
 
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let ipc_server = ipc::StateIpcServer::new()?;
 
     loop {
         match Config::load(&config_path) {
@@ -49,6 +48,8 @@ async fn main() -> Result<()> {
         let mut state = State::default();
         state.theme = config.theme.clone();
 
+        manager.update(&mut state)?;
+        update_global_plugins(&mut state)?;
 
         state.system.hostname = std::fs::read_to_string("/etc/hostname")
             .unwrap_or_default()
@@ -57,22 +58,11 @@ async fn main() -> Result<()> {
 
         state.system.time = Local::now().format("%H:%M:%S").to_string();
         state.system.uptime = System::uptime();
-        state.system.kernel = System::kernel_version().unwrap_or_default();
-
-        manager.update(&mut state)?;
-        update_global_plugins(&mut state)?;
 
         export::export(&state)?;
         ipc_server.update_state(&state);
 
-        tokio::select! {
-            _ = sleep(Duration::from_millis(config.refresh_ms)) => {},
-            _ = terminate.recv() => break,
-            _ = tokio::signal::ctrl_c() => break,
-        }
+        sleep(Duration::from_millis(config.refresh_ms)).await;
     }
-    manager.shutdown()?;
-    shutdown_global_plugins()?;
     ipc_server.shutdown();
-    Ok(())
 }

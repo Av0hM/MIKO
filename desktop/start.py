@@ -5,17 +5,15 @@ import json
 from pathlib import Path
 import subprocess
 import time
-import signal
 import gi
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=Path, default=Path.home()/'.config/eww-samos')
-parser.add_argument('--monitor', default='eDP-1')
+parser.add_argument('--monitor', default='all')
 parser.add_argument('--watch', action='store_true')
 args = parser.parse_args()
-signal.signal(signal.SIGTERM, lambda *_: exit(0))
 base = ['eww', '--config', str(args.config)]
 subprocess.run(base + ['daemon'], check=True)
 old = None

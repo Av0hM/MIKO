@@ -1,66 +1,111 @@
-//! Low-frequency spectrum snapshot and media metadata; frontend audio animation is separate.
 use anyhow::Result;
-use std::io::{BufRead,BufReader};
-use std::process::{Child,Command,Stdio};
-use std::sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
-use crate::{modules::Module,state::State};
+use std::io::{BufRead, BufReader};
+
+use crate::{modules::Module, state::State};
 
 pub struct VisualizerModule {
-    spectrum:Arc<Mutex<Vec<u8>>>,
-    child:Arc<Mutex<Option<Child>>>,
-    stop:Arc<AtomicBool>,
-    handle:Option<thread::JoinHandle<()>>,
+    spectrum: Arc<Mutex<Vec<u8>>>,
+    cava_handle: Option<thread::JoinHandle<()>>,
 }
+
 impl VisualizerModule {
-    /// Construct a spectrum collector with supervised cava and bounded metadata queries.
-    pub fn new()->Result<Self>{Ok(Self{spectrum:Arc::new(Mutex::new(vec![0;120])),child:Arc::new(Mutex::new(None)),stop:Arc::new(AtomicBool::new(false)),handle:None})}
-}
-impl Module for VisualizerModule {
-    fn name(&self)->&'static str{"visualizer"}
-    fn init(&mut self)->Result<()> {
-        let directory=std::path::PathBuf::from(std::env::var("HOME")?).join(".local/state/samos");std::fs::create_dir_all(&directory)?;
-        let config=directory.join("cava-backend.conf");
-        std::fs::write(&config,"[general]\nframerate=10\nbars=120\n[input]\nmethod=pulse\nsource=auto\n[output]\nmethod=raw\nraw_target=/dev/stdout\ndata_format=ascii\nascii_max_range=100\n")?;
-        let spectrum=self.spectrum.clone();let child=self.child.clone();let stop=self.stop.clone();
-        self.handle=Some(thread::spawn(move ||{
-            while !stop.load(Ordering::Relaxed){
-                match Command::new("cava").args(["-p",&config.to_string_lossy()]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn(){
-                    Ok(mut process)=>{
-                        let stdout=process.stdout.take();
-                        if let Ok(mut current)=child.lock(){*current=Some(process);}
-                        if stop.load(Ordering::Relaxed) {
-                            if let Ok(mut current)=child.lock(){if let Some(mut process)=current.take(){let _=process.kill();let _=process.wait();}}
-                            break;
-                        }
-                        if let Some(stdout)=stdout {
-                            for line in BufReader::new(stdout).lines(){
-                                if stop.load(Ordering::Relaxed){break;}
-                                let Ok(line)=line else{break;};
-                                let values:Vec<u8>=line.split(';').filter_map(|v|v.parse::<u8>().ok()).map(|n|n.min(100)).collect();
-                                if values.len()==120 {if let Ok(mut output)=spectrum.lock(){*output=values;}}
-                            }
-                        }
-                        if let Ok(mut current)=child.lock(){if let Some(mut process)=current.take(){let _=process.kill();let _=process.wait();}}
-                    },
-                    Err(e)=>eprintln!("[visualizer] cava unavailable: {e}"),
+    pub fn new() -> Result<Self> {
+        let spectrum = Arc::new(Mutex::new(vec![0u8; 120]));
+        let spectrum_clone = spectrum.clone();
+
+        let handle = thread::spawn(move || {
+            let config_path = format!("{}/.config/cava/cava_samos.conf", std::env::var("HOME").unwrap_or_default());
+            
+            let mut child = match Command::new("cava")
+                .args(["-p", &config_path])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[visualizer] Failed to spawn cava: {}", e);
+                    return;
                 }
-                if let Ok(mut output)=spectrum.lock(){output.fill(0);}
-                for _ in 0..30 {if stop.load(Ordering::Relaxed){break;}thread::sleep(Duration::from_millis(100));}
+            };
+
+            let stdout = match child.stdout.take() {
+                Some(s) => s,
+                None => {
+                    eprintln!("[visualizer] Failed to capture cava stdout");
+                    return;
+                }
+            };
+
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let values: Vec<u8> = l.split(';')
+                            .filter_map(|s| s.parse::<u8>().ok())
+                            .collect();
+                        if values.len() == 120 {
+                            *spectrum_clone.lock().unwrap() = values;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
-        }));Ok(())
+        });
+
+        Ok(Self {
+            spectrum,
+            cava_handle: Some(handle),
+        })
     }
-    fn update(&mut self,state:&mut State)->Result<()> {
-        state.visualizer.spectrum=self.spectrum.lock().map(|s|s.clone()).unwrap_or_else(|_|vec![0;120]);
-        let metadata=crate::process::run("playerctl",&["metadata","--format","{{title}}\n{{artist}}\n{{status}}"],None,2).unwrap_or_default();
-        let mut lines=metadata.lines();state.visualizer.now_playing_title=lines.next().unwrap_or_default().into();state.visualizer.now_playing_artist=lines.next().unwrap_or_default().into();state.visualizer.now_playing_status=lines.next().unwrap_or("Stopped").into();
+
+    fn get_now_playing(&self) -> (String, String, String) {
+        let output = Command::new("playerctl")
+            .args(["metadata", "--format", "{{title}}|{{artist}}|{{status}}"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let parts: Vec<&str> = stdout.split('|').collect();
+                if parts.len() == 3 {
+                    return (parts[0].to_string(), parts[1].to_string(), parts[2].to_string());
+                }
+            }
+            _ => {}
+        }
+        (String::new(), String::new(), "Stopped".to_string())
+    }
+}
+
+impl Module for VisualizerModule {
+    fn name(&self) -> &'static str {
+        "visualizer"
+    }
+
+    fn init(&mut self) -> Result<()> {
         Ok(())
     }
-    fn shutdown(&mut self)->Result<()> {
-        self.stop.store(true,Ordering::Relaxed);
-        if let Ok(mut current)=self.child.lock(){if let Some(mut process)=current.take(){let _=process.kill();let _=process.wait();}}
-        if let Some(handle)=self.handle.take(){let _=handle.join();}Ok(())
+
+    fn update(&mut self, state: &mut State) -> Result<()> {
+        let spectrum = self.spectrum.lock().unwrap().clone();
+        state.visualizer.spectrum = spectrum;
+
+        let (title, artist, status) = self.get_now_playing();
+        state.visualizer.now_playing_title = title;
+        state.visualizer.now_playing_artist = artist;
+        state.visualizer.now_playing_status = status;
+
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        if let Some(handle) = self.cava_handle.take() {
+            let _ = handle.join();
+        }
+        Ok(())
     }
 }
-impl Drop for VisualizerModule{fn drop(&mut self){let _=self.shutdown();}}

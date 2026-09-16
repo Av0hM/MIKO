@@ -17,23 +17,22 @@ impl ModuleManager {
     }
 
     pub fn init(&mut self) -> Result<()> {
-        self.modules.retain_mut(|module| match module.init() {
-            Ok(()) => true,
-            Err(error) => { eprintln!("[{}] Initialization failed; disabled: {error}", module.name()); let _ = module.shutdown(); false }
-        });
+        for module in &mut self.modules {
+            module.init()?;
+        }
         Ok(())
     }
 
     pub fn update(&mut self, state: &mut State) -> Result<()> {
         for module in &mut self.modules {
-            if let Err(error) = module.update(state) { eprintln!("[{}] Update failed: {error}", module.name()); }
+            module.update(state)?;
         }
         Ok(())
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
         for module in &mut self.modules {
-            if let Err(error) = module.shutdown() { eprintln!("[{}] Shutdown failed: {error}", module.name()); }
+            module.shutdown()?;
         }
         Ok(())
     }

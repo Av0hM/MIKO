@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use crate::{modules::Module, state::State};
 
-const DEFAULT_MODEL: &str = "qwen2.5:1.5b";
+const MODEL: &str = "qwen2.5:7b";
 const MAX_TURNS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,7 +53,6 @@ struct Assistant {
     sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
     home: PathBuf,
     url: String,
-    model: String,
     busy: AtomicUsize,
     health: Mutex<String>,
 }
@@ -63,7 +62,7 @@ impl Assistant {
         let db=rusqlite::Connection::open(directory.join("ai.db"))?;
         db.busy_timeout(Duration::from_secs(2))?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, due_at INTEGER, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, summary TEXT NOT NULL, updated_at INTEGER NOT NULL);")?;
-        Ok(Self { client: reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(90)).build()?, db: Mutex::new(db), sessions: Mutex::new(HashMap::new()), home, url, model: std::env::var("SAMOS_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()), busy: AtomicUsize::new(0), health: Mutex::new("idle".into()) })
+        Ok(Self { client: reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(90)).build()?, db: Mutex::new(db), sessions: Mutex::new(HashMap::new()), home, url, busy: AtomicUsize::new(0), health: Mutex::new("idle".into()) })
     }
     fn live_state(&self) -> Result<State> {
         let path=self.home.join(".local/state/samos/state.json");
@@ -84,9 +83,9 @@ impl Assistant {
         Ok(sessions.entry(id.into()).or_default().clone())
     }
     async fn ask(&self, messages: &[Message], tools: bool) -> Result<Message> {
-        let request=json!({"model":self.model,"messages":messages,"stream":false,"tools":if tools {tool_definitions()} else {Vec::new()},"options":{"num_predict":1024,"num_ctx":4096}});
+        let request=json!({"model":MODEL,"messages":messages,"stream":false,"tools":if tools {tool_definitions()} else {Vec::new()},"options":{"num_predict":1024,"num_ctx":4096}});
         let response=self.client.post(format!("{}/api/chat",self.url)).json(&request).send().await.context("Cannot reach local Ollama")?;
-        ensure!(response.status().is_success(),"Ollama returned {}. Check that {} is installed.",response.status(),self.model);
+        ensure!(response.status().is_success(),"Ollama returned {}. Check that {MODEL} is installed.",response.status());
         let body:Value=response.json().await?;
         Ok(serde_json::from_value(body.get("message").context("Missing Ollama message")?.clone())?)
     }
@@ -322,7 +321,7 @@ impl Module for AiModule {
         }));Ok(())
     }
     fn update(&mut self,state:&mut State)->Result<()>{
-        state.ai.model=self.assistant.model.clone();state.ai.status=if self.assistant.busy.load(Ordering::Relaxed)>0{"busy".into()}else{self.assistant.health.lock().map(|s|s.clone()).unwrap_or_else(|_|"error".into())};Ok(())
+        state.ai.model=MODEL.into();state.ai.status=if self.assistant.busy.load(Ordering::Relaxed)>0{"busy".into()}else{self.assistant.health.lock().map(|s|s.clone()).unwrap_or_else(|_|"error".into())};Ok(())
     }
     fn shutdown(&mut self)->Result<()>{
         self.stop.store(true,Ordering::Relaxed);if let Some(handle)=self.handle.take(){let _=handle.join();}let _=std::fs::remove_file(&self.socket);Ok(())

@@ -20,10 +20,8 @@ def files(root):
         result[root/'.local/bin'/name]=ROOT/'target/release'/name
     return result
 
-def install(root,activate=False,whisper_binary=None):
+def install(root,activate=False):
     mapping=files(root)
-    if whisper_binary is not None:
-        mapping[root/'.local/bin/whisper-cli']=whisper_binary
     for path in mapping.values():
         if not path.is_file():
             raise RuntimeError(f'Missing installation asset: {path}. Build samosd and samosctl first.')
@@ -58,26 +56,13 @@ Description=SamOS desktop corner widgets
 After=graphical-session.target samosd.service
 PartOf=graphical-session.target
 [Service]
-ExecStart=/usr/bin/python3 %h/.local/share/samos/desktop/start.py --watch --monitor eDP-1
+ExecStart=/usr/bin/python3 %h/.local/share/samos/desktop/start.py --watch --monitor all
 ExecStop=/usr/bin/eww --config %h/.config/eww-samos kill
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=8
 [Install]
 WantedBy=graphical-session.target
-''')
-    write(root/'.config/systemd/user/samos-ollama.service','''[Unit]
-Description=Local Ollama for MIKO
-[Service]
-ExecStart=/usr/bin/ollama serve
-Environment=OLLAMA_HOST=127.0.0.1:11434
-Environment=OLLAMA_KEEP_ALIVE=2m
-Environment=OLLAMA_NUM_PARALLEL=1
-Restart=on-failure
-RestartSec=5
-TimeoutStopSec=8
-[Install]
-WantedBy=default.target
 ''')
     config=root/'.config/samos/config.toml'
     if not config.exists():write(config,'theme="hud"\nmonitor="all"\nrefresh_ms=1000\n')
@@ -89,7 +74,7 @@ WantedBy=default.target
         if root!=Path.home():raise RuntimeError('Activation only supports the current home directory')
         subprocess.run(['systemctl','--user','import-environment','WAYLAND_DISPLAY','DISPLAY','HYPRLAND_INSTANCE_SIGNATURE'],check=True)
         subprocess.run(['systemctl','--user','daemon-reload'],check=True)
-        subprocess.run(['systemctl','--user','enable','--now','samosd.service','samos-ollama.service','samos-desktop.service'],check=True)
+        subprocess.run(['systemctl','--user','enable','--now','samosd.service','samos-desktop.service'],check=True)
         subprocess.run(['systemctl','--user','restart','samos-desktop.service'],check=True)
     return backup
 
@@ -97,6 +82,5 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prefix',type=Path,default=Path.home())
     parser.add_argument('--activate',action='store_true')
-    parser.add_argument('--whisper-binary',type=Path,help='Install a separately built whisper-cli with backup')
     args=parser.parse_args()
-    install(args.prefix.resolve(),args.activate,args.whisper_binary)
+    install(args.prefix.resolve(),args.activate)

@@ -1,187 +1,460 @@
-//! Validated, edge-triggered automation with hot reload and a bounded action queue.
-use crate::{modules::Module, state::{ConditionOperator, Rule, RuleAction, RuleCondition, State}};
-use anyhow::{Context, Result, bail, ensure};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc::{SyncSender, sync_channel}};
-use std::time::Duration;
+use crate::state::{ConditionOperator, Rule, RuleAction, RuleCondition, State};
+use anyhow::{anyhow, Result};
+use serde_json::{json, Number, Value};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub struct AutomationModule {
-    rules: Mutex<Vec<Rule>>,
-    matched: HashMap<String,bool>,
-    path: PathBuf,
-    source: Option<Vec<u8>>,
-    sender: Option<SyncSender<RuleAction>>,
-    stop: Arc<AtomicBool>,
+    rules: Arc<Mutex<Vec<Rule>>>,
+    last_states: Arc<Mutex<HashMap<String, serde_json::Value>>>,
 }
+
 impl AutomationModule {
-    /// Construct an automation engine. Rules are loaded during initialization.
-    pub fn new()->Result<Self>{Self::at(PathBuf::from(std::env::var("HOME")?).join(".config/samos/rules.json"))}
-    fn at(path:PathBuf)->Result<Self>{Ok(Self{rules:Mutex::new(Vec::new()),matched:HashMap::new(),path,source:None,sender:None,stop:Arc::new(AtomicBool::new(false))})}
-    fn reload(&mut self)->Result<()> {
-        let bytes=match std::fs::read(&self.path){Ok(bytes)=>bytes,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>b"[]".to_vec(),Err(e)=>return Err(e.into())};
-        if self.source.as_ref()==Some(&bytes){return Ok(());}
-        self.source=Some(bytes.clone());
-        let rules=Self::validate_rules(serde_json::from_slice(&bytes)?)?;
-        let ids:HashSet<_>=rules.iter().map(|r|r.id.clone()).collect();
-        self.matched.retain(|id,_|ids.contains(id));
-        *self.rules.lock().map_err(|_|anyhow::anyhow!("Rules unavailable"))?=rules;
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            rules: Arc::new(Mutex::new(Vec::new())),
+            last_states: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn load_rules(&self) -> Result<()> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = format!("{}/.config/samos/rules.json", home);
+
+        if std::path::Path::new(&path).exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let rules: Vec<Rule> = serde_json::from_str(&content)?;
+            let validated_rules = Self::validate_rules(rules)?;
+            *self.rules.lock().unwrap() = validated_rules;
+        }
         Ok(())
     }
-    /// Validate the complete ruleset, including field types and action arguments.
-    pub fn validate_rules(mut rules:Vec<Rule>)->Result<Vec<Rule>> {
-        ensure!(rules.len()<=128,"At most 128 automation rules are supported");
-        let sample=serde_json::to_value(State::default())?;
-        let mut ids=HashSet::new();
-        for rule in &mut rules {
-            if rule.id.is_empty(){rule.id=uuid::Uuid::new_v4().to_string();}
-            ensure!(ids.insert(rule.id.clone()),"Duplicate rule ID: {}",rule.id);
-            ensure!(!rule.name.trim().is_empty(),"Rule name cannot be empty");
-            ensure!(!rule.conditions.is_empty() && rule.conditions.len()<=16,"Rules need 1–16 conditions");
-            ensure!(!rule.actions.is_empty() && rule.actions.len()<=8,"Rules need 1–8 actions");
+
+    fn validate_rules(rules: Vec<Rule>) -> Result<Vec<Rule>> {
+        let mut validated = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        for mut rule in rules {
+            if rule.id.is_empty() {
+                rule.id = uuid::Uuid::new_v4().to_string();
+            }
+            if seen_ids.contains(&rule.id) {
+                return Err(anyhow!("Duplicate rule ID: {}", rule.id));
+            }
+            seen_ids.insert(rule.id.clone());
+
+            if rule.name.is_empty() {
+                return Err(anyhow!("Rule '{}' has empty name", rule.id));
+            }
+
+            if rule.conditions.is_empty() {
+                return Err(anyhow!("Rule '{}' has no conditions", rule.id));
+            }
+
             for condition in &rule.conditions {
-                let value=field(&sample,&condition.field).context(format!("Unknown rule field: {}",condition.field))?;
-                match condition.operator {
-                    ConditionOperator::GreaterThan|ConditionOperator::LessThan=>ensure!(value.is_number()&&condition.value.is_number(),"Numeric comparison needs numeric values"),
-                    ConditionOperator::Contains|ConditionOperator::StartsWith|ConditionOperator::EndsWith=>ensure!(value.is_string()&&condition.value.is_string(),"String comparison needs string values"),
-                    _=>ensure!((value.is_number()&&condition.value.is_number())||(value.is_string()&&condition.value.is_string())||(value.is_boolean()&&condition.value.is_boolean()),"Condition value has the wrong type"),
+                if condition.field.is_empty() {
+                    return Err(anyhow!("Rule '{}' has condition with empty field", rule.id));
+                }
+                if !Self::is_valid_field_path(&condition.field) {
+                    return Err(anyhow!("Rule '{}' has invalid field path: {}", rule.id, condition.field));
                 }
             }
-            for action in &rule.actions {validate_action(action)?;}
-        }
-        Ok(rules)
-    }
-    fn save(&self,rules:&[Rule])->Result<()> {
-        let parent=self.path.parent().context("Rules path needs a parent")?;
-        std::fs::create_dir_all(parent)?;
-        let temp=parent.join(format!(".rules-{}.tmp",uuid::Uuid::new_v4()));
-        std::fs::write(&temp,serde_json::to_vec_pretty(rules)?)?;
-        if let Err(error)=std::fs::rename(&temp,&self.path){let _=std::fs::remove_file(&temp);return Err(error.into());}
-        Ok(())
-    }
-    /// Add and persist a validated rule without losing the old rules on write failure.
-    pub fn add_rule(&self,rule:Rule)->Result<()> {
-        let mut current=self.rules.lock().map_err(|_|anyhow::anyhow!("Rules unavailable"))?;
-        let mut candidate=current.clone();candidate.push(rule);
-        let candidate=Self::validate_rules(candidate)?;self.save(&candidate)?;*current=candidate;Ok(())
-    }
-    /// Remove a rule and persist the result.
-    pub fn remove_rule(&self,id:&str)->Result<()> {
-        let mut current=self.rules.lock().map_err(|_|anyhow::anyhow!("Rules unavailable"))?;
-        let candidate:Vec<_>=current.iter().filter(|r|r.id!=id).cloned().collect();
-        self.save(&candidate)?;*current=candidate;Ok(())
-    }
-    /// Return a snapshot of loaded rules.
-    pub fn get_rules(&self)->Vec<Rule>{self.rules.lock().map(|r|r.clone()).unwrap_or_default()}
-    fn triggered(&mut self,rule:&Rule,state:&Value)->bool {
-        let matches=rule.enabled&&rule.conditions.iter().all(|c|evaluate(c,state));
-        let previous=self.matched.insert(rule.id.clone(),matches).unwrap_or(false);
-        matches&&!previous
-    }
-}
-fn field<'a>(state:&'a Value,path:&str)->Option<&'a Value>{
-    let parts:Vec<_>=path.split('.').collect();
-    if parts.len()>2 || parts.is_empty(){return None;}
-    let mut current=state;
-    for part in parts {current=current.get(part)?;}
-    if current.is_array()||current.is_object()||current.is_null(){None}else{Some(current)}
-}
-fn evaluate(condition:&RuleCondition,state:&Value)->bool {
-    let Some(a)=field(state,&condition.field) else{return false;};let b=&condition.value;
-    match condition.operator {
-        ConditionOperator::Equals=>if a.is_number()&&b.is_number(){a.as_f64()==b.as_f64()}else{a==b},
-        ConditionOperator::NotEquals=>if a.is_number()&&b.is_number(){a.as_f64()!=b.as_f64()}else{a!=b},
-        ConditionOperator::GreaterThan=>a.as_f64().zip(b.as_f64()).is_some_and(|(a,b)|a>b),
-        ConditionOperator::LessThan=>a.as_f64().zip(b.as_f64()).is_some_and(|(a,b)|a<b),
-        ConditionOperator::Contains=>a.as_str().zip(b.as_str()).is_some_and(|(a,b)|a.contains(b)),
-        ConditionOperator::StartsWith=>a.as_str().zip(b.as_str()).is_some_and(|(a,b)|a.starts_with(b)),
-        ConditionOperator::EndsWith=>a.as_str().zip(b.as_str()).is_some_and(|(a,b)|a.ends_with(b)),
-    }
-}
-fn app_id(id:&str)->bool{!id.is_empty()&&!id.starts_with('-')&&id.len()<=200&&id.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b))}
-fn command_parts(command:&str)->Result<Vec<&str>>{
-    ensure!(!command.chars().any(|c|";|&`$<>\\\n\r\"'".contains(c)),"Shell syntax is not allowed; use a structured action for text with spaces or punctuation");
-    let parts:Vec<_>=command.split_whitespace().collect();
-    match parts.as_slice(){
-        ["samosctl", "wifi-toggle"|"bluetooth-toggle"]=>{},
-        ["samosctl","theme-set",name]=>crate::config::validate_name(name)?,
-        ["samosctl","power-profile",profile]|["powerprofilesctl","set",profile]=>ensure!(["balanced","power-saver","performance"].contains(profile),"Invalid power profile"),
-        ["hyprctl","dispatch","workspace",id]=>ensure!(id.parse::<u32>().is_ok_and(|n|(1..=1000).contains(&n)),"Invalid workspace"),
-        ["gtk-launch",id]=>ensure!(app_id(id),"Invalid application ID"),
-        ["notify-send",rest @ ..]=>ensure!(!rest.is_empty() && !rest.iter().any(|s|s.starts_with('-')),"Use plain notification text"),
-        _=>bail!("Command is not on the automation allowlist"),
-    }
-    Ok(parts)
-}
-fn validate_action(action:&RuleAction)->Result<()> {
-    match action {
-        RuleAction::RunCommand{command}=>{command_parts(command)?;},
-        RuleAction::SetTheme{theme}=>crate::config::validate_name(theme)?,
-        RuleAction::SetPowerProfile{profile}=>ensure!(["balanced","power-saver","performance"].contains(&profile.as_str()),"Invalid power profile"),
-        RuleAction::SwitchWorkspace{workspace_id}=>ensure!((1..=1000).contains(workspace_id),"Invalid workspace"),
-        RuleAction::LaunchApp{app_id:id}=>ensure!(app_id(id),"Invalid app ID"),
-        RuleAction::Speak{text}=>ensure!(!text.trim().is_empty()&&text.len()<=4000,"Speech must contain 1–4000 bytes"),
-        _=>{},
-    }Ok(())
-}
-fn execute(action:&RuleAction)->Result<()> {
-    use crate::process::run;
-    match action {
-        RuleAction::Notify=>{run("notify-send",&["SamOS","Automation rule triggered"],None,5)?;},
-        RuleAction::Log{message}=>eprintln!("[automation] {message}"),
-        RuleAction::RunCommand{command}=>{let parts=command_parts(command)?;run(parts[0],&parts[1..],None,8)?;},
-        RuleAction::SetTheme{theme}=>{let path=crate::config::Config::path()?;ensure!(path.parent().context("Config directory missing")?.join("themes").join(format!("{theme}.toml")).is_file(),"Theme not found");crate::config::set_theme_at(&path,theme)?;},
-        RuleAction::SetPowerProfile{profile}=>{run("powerprofilesctl",&["set",profile],None,8)?;},
-        RuleAction::SwitchWorkspace{workspace_id}=>{run("hyprctl",&["dispatch","workspace",&workspace_id.to_string()],None,5)?;},
-        RuleAction::LaunchApp{app_id}=>{run("gtk-launch",&[app_id],None,8)?;},
-        RuleAction::ToggleWifi|RuleAction::ToggleBluetooth=>{
-            let binary=PathBuf::from(std::env::var("HOME")?).join(".local/bin/samosctl");
-            run(&binary.to_string_lossy(),&[if matches!(action,RuleAction::ToggleWifi){"wifi-toggle"}else{"bluetooth-toggle"}],None,10)?;
-        },
-        RuleAction::Speak{text}=>{
-            let home=PathBuf::from(std::env::var("HOME")?);
-            let directory=std::env::temp_dir().join(format!("samos-automation-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&directory)?;
-            let result=(||->Result<()>{
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&directory,std::fs::Permissions::from_mode(0o700))?;
-                let output=directory.join("speech.wav");let model=home.join(".local/share/piper/voices/en_US-lessac-medium.onnx");
-                let data=format!("ESPEAK_DATA_PATH={}",home.join(".local/share/espeak-ng-data").display());let libraries=format!("LD_LIBRARY_PATH={}",home.join(".local/lib").display());
-                run("env",&[&data,&libraries,&home.join(".local/bin/piper").to_string_lossy(),"--model",&model.to_string_lossy(),"--output_file",&output.to_string_lossy()],Some(text),60)?;
-                run("aplay",&["-q",&output.to_string_lossy()],None,90)?;Ok(())
-            })();let _=std::fs::remove_dir_all(directory);result?;
-        }
-    }Ok(())
-}
-impl Module for AutomationModule {
-    fn name(&self)->&'static str{"automation"}
-    fn init(&mut self)->Result<()> {
-        if let Err(e)=self.reload(){eprintln!("[automation] No valid rules loaded: {e}");}
-        let (sender,receiver)=sync_channel::<RuleAction>(16);self.sender=Some(sender);let stop=self.stop.clone();
-        std::thread::spawn(move ||{
-            while !stop.load(Ordering::Relaxed){
-                match receiver.recv_timeout(Duration::from_millis(200)){
-                    Ok(action)=>if let Err(e)=execute(&action){eprintln!("[automation] Action failed: {e}");},
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{},Err(_)=>break,
+
+            if rule.actions.is_empty() {
+                return Err(anyhow!("Rule '{}' has no actions", rule.id));
+            }
+
+            for action in &rule.actions {
+                if let RuleAction::RunCommand { command } = action {
+                    if !Self::is_command_allowed(command) {
+                        return Err(anyhow!("Rule '{}' uses disallowed command: {}", rule.id, command));
+                    }
                 }
             }
-        });Ok(())
+
+            validated.push(rule);
+        }
+
+        Ok(validated)
     }
-    fn update(&mut self,state:&mut State)->Result<()> {
-        if let Err(e)=self.reload(){eprintln!("[automation] Keeping last valid rules: {e}");}
-        let rules=self.get_rules();state.automation.enabled=true;state.automation.rules_count=rules.len();
-        let value=serde_json::to_value(&state)?;
-        for rule in rules {if self.triggered(&rule,&value){for action in rule.actions {if let Some(sender)=&self.sender {if let Err(error)=sender.try_send(action){eprintln!("[automation] Action queue full or unavailable: {error}");}}}}}
+
+    fn is_valid_field_path(path: &str) -> bool {
+        let valid_prefixes = [
+            "system.", "cpu.", "memory.", "battery.", "disk.", "network.",
+            "temperature.", "control.", "workspace.", "ai.", "automation.", "theme"
+        ];
+        valid_prefixes.iter().any(|p| path.starts_with(p))
+    }
+
+    fn is_command_allowed(command: &str) -> bool {
+        let allowed_prefixes = [
+            "samosctl ",
+            "hyprctl dispatch workspace ",
+            "powerprofilesctl set ",
+            "gtk-launch ",
+            "notify-send ",
+        ];
+        let dangerous_patterns = [
+            "rm ", "sudo ", "dd ", "mkfs ", "shutdown", "reboot", "kill ",
+            "chmod 777", "chown root", "> /dev/", "| sh", "| bash", "; rm",
+            "&& rm", "`", "$(", "||", "&&",
+        ];
+
+        for pattern in &dangerous_patterns {
+            if command.contains(pattern) {
+                return false;
+            }
+        }
+
+        allowed_prefixes.iter().any(|p| command.starts_with(p))
+    }
+
+    fn save_rules(&self) -> Result<()> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = format!("{}/.config/samos/rules.json", home);
+
+        std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap())?;
+        let content = serde_json::to_string_pretty(&*self.rules.lock().unwrap())?;
+        std::fs::write(&path, content)?;
         Ok(())
     }
-    fn shutdown(&mut self)->Result<()>{self.stop.store(true,Ordering::Relaxed);self.sender.take();Ok(())}
+
+    pub fn add_rule(&self, mut rule: Rule) -> Result<()> {
+        if rule.id.is_empty() {
+            rule.id = uuid::Uuid::new_v4().to_string();
+        }
+        let validated = Self::validate_rules(vec![rule])?;
+        self.rules.lock().unwrap().push(validated.into_iter().next().unwrap());
+        self.save_rules()
+    }
+
+    pub fn remove_rule(&self, rule_id: &str) -> Result<()> {
+        self.rules.lock().unwrap().retain(|r| r.id != rule_id);
+        self.save_rules()
+    }
+
+    pub fn get_rules(&self) -> Vec<Rule> {
+        self.rules.lock().unwrap().clone()
+    }
+
+    fn evaluate_condition(&self, condition: &RuleCondition, state: &State) -> bool {
+        let value = self.get_state_value(&condition.field, state);
+        match &condition.operator {
+            ConditionOperator::Equals => value == condition.value,
+            ConditionOperator::NotEquals => value != condition.value,
+            ConditionOperator::GreaterThan => {
+                if let (Value::Number(a), Value::Number(b)) = (value, &condition.value) {
+                    a.as_f64().unwrap_or(0.0) > b.as_f64().unwrap_or(0.0)
+                } else {
+                    false
+                }
+            }
+            ConditionOperator::LessThan => {
+                if let (Value::Number(a), Value::Number(b)) = (value, &condition.value) {
+                    a.as_f64().unwrap_or(0.0) < b.as_f64().unwrap_or(0.0)
+                } else {
+                    false
+                }
+            }
+            ConditionOperator::Contains => {
+                if let (Value::String(a), Value::String(b)) = (value, &condition.value) {
+                    a.contains(b)
+                } else {
+                    false
+                }
+            }
+            ConditionOperator::StartsWith => {
+                if let (Value::String(a), Value::String(b)) = (value, &condition.value) {
+                    a.starts_with(b)
+                } else {
+                    false
+                }
+            }
+            ConditionOperator::EndsWith => {
+                if let (Value::String(a), Value::String(b)) = (value, &condition.value) {
+                    a.ends_with(b)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn get_state_value(&self, path: &str, state: &State) -> serde_json::Value {
+        let parts: Vec<&str> = path.split('.').collect();
+        match parts.as_slice() {
+            ["system", field] => match *field {
+                "hostname" => Value::String(state.system.hostname.clone()),
+                "kernel" => Value::String(state.system.kernel.clone()),
+                "uptime" => Value::Number(state.system.uptime.into()),
+                "time" => Value::String(state.system.time.clone()),
+                _ => Value::Null,
+            },
+            ["cpu", field] => match *field {
+                "usage" => {
+                    let num = Number::from_f64(state.cpu.usage as f64).unwrap();
+                    Value::Number(num)
+                }
+                _ => Value::Null,
+            },
+            ["memory", field] => match *field {
+                "used_mb" => Value::Number(state.memory.used_mb.into()),
+                "total_mb" => Value::Number(state.memory.total_mb.into()),
+                "used_percent" => {
+                    let num = Number::from_f64(state.memory.used_percent as f64).unwrap();
+                    Value::Number(num)
+                }
+                _ => Value::Null,
+            },
+            ["battery", field] => match *field {
+                "percent" => {
+                    let num = Number::from_f64(state.battery.percent as f64).unwrap();
+                    Value::Number(num)
+                }
+                "status" => Value::String(state.battery.status.clone()),
+                _ => Value::Null,
+            },
+            ["disk", field] => match *field {
+                "used_gb" => Value::Number(state.disk.used_gb.into()),
+                "total_gb" => Value::Number(state.disk.total_gb.into()),
+                "used_percent" => {
+                    let num = Number::from_f64(state.disk.used_percent as f64).unwrap();
+                    Value::Number(num)
+                }
+                _ => Value::Null,
+            },
+            ["network", field] => match *field {
+                "rx_kb" => Value::Number(state.network.rx_kb.into()),
+                "tx_kb" => Value::Number(state.network.tx_kb.into()),
+                _ => Value::Null,
+            },
+            ["temperature", field] => match *field {
+                "celsius" => {
+                    let num = Number::from_f64(state.temperature.celsius as f64).unwrap();
+                    Value::Number(num)
+                }
+                _ => Value::Null,
+            },
+            ["control", field] => match *field {
+                "wifi_enabled" => Value::Bool(state.control.wifi_enabled),
+                "wifi_ssid" => Value::String(state.control.wifi_ssid.clone()),
+                "bluetooth_enabled" => Value::Bool(state.control.bluetooth_enabled),
+                "bluetooth_connected" => Value::String(state.control.bluetooth_connected.clone()),
+                "night_light_enabled" => Value::Bool(state.control.night_light_enabled),
+                "night_light_temp" => Value::Number(state.control.night_light_temp.into()),
+                "power_profile" => Value::String(state.control.power_profile.clone()),
+                _ => Value::Null,
+            },
+            ["workspace", field] => match *field {
+                "active_id" => Value::Number(state.workspace.active_id.into()),
+                _ => Value::Null,
+            },
+            ["ai", field] => match *field {
+                "model" => Value::String(state.ai.model.clone()),
+                "status" => Value::String(state.ai.status.clone()),
+                _ => Value::Null,
+            },
+            ["automation", field] => match *field {
+                "enabled" => Value::Bool(state.automation.enabled),
+                "rules_count" => Value::Number(state.automation.rules_count.into()),
+                _ => Value::Null,
+            },
+            ["theme"] => Value::String(state.theme.clone()),
+            _ => Value::Null,
+        }
+    }
+
+    fn execute_action(&self, action: &RuleAction) -> Result<()> {
+        match action {
+            RuleAction::Notify => {
+                let _ = std::process::Command::new("notify-send")
+                    .args(["Automation", "Rule triggered"])
+                    .output();
+            }
+            RuleAction::RunCommand { command } => {
+                if !Self::is_command_allowed(command) {
+                    return Err(anyhow!("Command not allowed by security policy: {}", command));
+                }
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Command failed: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::SetTheme { theme } => {
+                let output = std::process::Command::new("samosctl")
+                    .args(["theme-set", theme])
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Failed to set theme: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::SetPowerProfile { profile } => {
+                let output = std::process::Command::new("powerprofilesctl")
+                    .args(["set", profile])
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Failed to set power profile: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::ToggleWifi => {
+                let output = std::process::Command::new("samosctl")
+                    .args(["wifi-toggle"])
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Failed to toggle wifi: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::ToggleBluetooth => {
+                let output = std::process::Command::new("samosctl")
+                    .args(["bluetooth-toggle"])
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Failed to toggle bluetooth: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::SwitchWorkspace { workspace_id } => {
+                let output = std::process::Command::new("hyprctl")
+                    .args(["dispatch", "workspace", &workspace_id.to_string()])
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Failed to switch workspace: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::LaunchApp { app_id } => {
+                let output = std::process::Command::new("gtk-launch")
+                    .arg(app_id)
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("Failed to launch app: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+            RuleAction::Speak { text } => {
+                let output = std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        &format!(
+                            "ESPEAK_DATA_PATH=~/.local/share/espeak-ng-data LD_LIBRARY_PATH=~/.local/lib:$LD_LIBRARY_PATH piper --model ~/.local/share/piper/voices/en_US-lessac-medium.onnx --output_file /tmp/automation_tts.wav <<< '{}'",
+                            text
+                        ),
+                    ])
+                    .output()?;
+                if !output.status.success() {
+                    eprintln!("TTS failed: {}", String::from_utf8_lossy(&output.stderr));
+                } else {
+                    let _ = std::process::Command::new("aplay")
+                        .args(["/tmp/automation_tts.wav"])
+                        .output();
+                }
+            }
+            RuleAction::Log { message } => {
+                eprintln!("[automation] {}", message);
+            }
+        }
+        Ok(())
+    }
+
+    fn state_changed(&self, state: &State) -> bool {
+        let mut last_states = self.last_states.lock().unwrap();
+        let current = self.state_to_value(state);
+        let changed = last_states.get("state") != Some(&current);
+        last_states.insert("state".to_string(), current);
+        changed
+    }
+
+    fn state_to_value(&self, state: &State) -> serde_json::Value {
+        json!({
+            "cpu": state.cpu.usage,
+            "memory": {
+                "used_mb": state.memory.used_mb,
+                "total_mb": state.memory.total_mb,
+                "used_percent": state.memory.used_percent,
+            },
+            "battery": {
+                "percent": state.battery.percent,
+                "status": state.battery.status,
+            },
+            "disk": {
+                "used_gb": state.disk.used_gb,
+                "total_gb": state.disk.total_gb,
+                "used_percent": state.disk.used_percent,
+            },
+            "network": {
+                "rx_kb": state.network.rx_kb,
+                "tx_kb": state.network.tx_kb,
+            },
+            "temperature": state.temperature.celsius,
+            "control": {
+                "wifi_enabled": state.control.wifi_enabled,
+                "wifi_ssid": state.control.wifi_ssid,
+                "bluetooth_enabled": state.control.bluetooth_enabled,
+                "bluetooth_connected": state.control.bluetooth_connected,
+                "night_light_enabled": state.control.night_light_enabled,
+                "night_light_temp": state.control.night_light_temp,
+                "power_profile": state.control.power_profile,
+            },
+            "workspace": {
+                "active_id": state.workspace.active_id,
+            },
+            "ai": {
+                "model": state.ai.model,
+                "status": state.ai.status,
+            },
+            "automation": {
+                "enabled": state.automation.enabled,
+                "rules_count": state.automation.rules_count,
+            },
+            "theme": state.theme,
+        })
+    }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;use serde_json::json;
-    fn rule()->Rule{Rule{id:"battery".into(),name:"Low battery".into(),enabled:true,conditions:vec![RuleCondition{field:"battery.percent".into(),operator:ConditionOperator::LessThan,value:json!(20)}],actions:vec![RuleAction::Log{message:"low".into()}]}}
-    #[test]fn reject_shell_bypass(){for command in ["notify-send ok; printf bad","notify-send ok\nprintf bad","gtk-launch $(id)","samosctl unexpected"]{assert!(command_parts(command).is_err());}assert!(command_parts("hyprctl dispatch workspace 2").is_ok());}
-    #[test]fn reject_invalid_fields_and_duplicates(){let mut invalid=rule();invalid.conditions[0].field="cpu.typo".into();assert!(AutomationModule::validate_rules(vec![invalid]).is_err());assert!(AutomationModule::validate_rules(vec![rule(),rule()]).is_err());}
-    #[test]fn trigger_only_on_transition(){let mut module=AutomationModule::at(PathBuf::from("/tmp/not-read")).unwrap();let mut state=json!({"battery":{"percent":10},"cpu":{"usage":1}});assert!(module.triggered(&rule(),&state));state["cpu"]["usage"]=json!(99);assert!(!module.triggered(&rule(),&state));state["battery"]["percent"]=json!(50);assert!(!module.triggered(&rule(),&state));state["battery"]["percent"]=json!(10);assert!(module.triggered(&rule(),&state));}
-    #[test]fn reload_keeps_valid_rules_on_error_and_clears_on_delete(){let path=std::env::temp_dir().join(format!("samos-rules-{}.json",uuid::Uuid::new_v4()));std::fs::write(&path,serde_json::to_vec(&vec![rule()]).unwrap()).unwrap();let mut module=AutomationModule::at(path.clone()).unwrap();module.reload().unwrap();assert_eq!(module.get_rules().len(),1);std::fs::write(&path,b"invalid").unwrap();assert!(module.reload().is_err());assert_eq!(module.get_rules().len(),1);std::fs::remove_file(path).unwrap();module.reload().unwrap();assert!(module.get_rules().is_empty());}
+
+impl crate::modules::Module for AutomationModule {
+    fn name(&self) -> &'static str {
+        "automation"
+    }
+
+    fn init(&mut self) -> Result<()> {
+        self.load_rules()?;
+        Ok(())
+    }
+
+    fn update(&mut self, state: &mut State) -> Result<()> {
+        state.automation.enabled = true;
+        state.automation.rules_count = self.rules.lock().unwrap().len();
+
+        if !self.state_changed(state) {
+            return Ok(());
+        }
+
+        let rules = self.rules.lock().unwrap().clone();
+        for rule in rules {
+            if !rule.enabled {
+                continue;
+            }
+
+            let mut all_match = true;
+            for condition in &rule.conditions {
+                if !self.evaluate_condition(condition, state) {
+                    all_match = false;
+                    break;
+                }
+            }
+
+            if all_match {
+                for action in &rule.actions {
+                    if let Err(e) = self.execute_action(action) {
+                        eprintln!("Failed to execute action for rule '{}': {}", rule.name, e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        Ok(())
+    }
 }

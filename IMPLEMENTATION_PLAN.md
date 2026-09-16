@@ -4,7 +4,7 @@
 
 Separate desktop surfaces behind application windows, with no reserved screen area. A restrained graphite/ice-blue palette, translucent rounded cards, readable typography without private-use icon glyphs, and clear empty/error states. Top left: identity, live system metrics, workspaces. Top right: clock and quick controls. Bottom left: now-playing card. Bottom right: MIKO chat and explicit tool confirmation. Along the bottom edge: a real audio-reactive spectrum. Applications cover the desktop naturally. Chat takes keyboard focus only when clicked.
 
-Display policy: laptop display eDP-1 only, per the user's latest instruction. Leave external displays clear. Resolve monitor names at startup rather than hardcoding numeric monitor zero. Do not replace wallpaper, application layout, or existing compositor keybindings. Music visualization follows actual playback, with a quiet idle state instead of invented activity.
+Display policy: use the user's selected displays; default to all connected displays. Resolve monitor names at startup rather than hardcoding numeric monitor zero. Do not replace wallpaper, application layout, or existing compositor keybindings. Music visualization follows actual playback, with a quiet idle state instead of invented activity.
 
 ## Constraints
 
