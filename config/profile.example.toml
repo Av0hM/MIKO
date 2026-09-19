@@ -1,0 +1,11 @@
+# Optional: copy to ~/.config/samos/profile.toml and edit.
+# Reloaded on each new chat/voice turn; malformed edits retain the last valid profile.
+# Limits: 8 KiB file, 80-byte name, 600-byte tone, eight shortcuts.
+name = ""
+tone = "Warm, direct and concise. Be conversational; disagree when useful."
+
+# Shortcuts are context only until the confirmed browser tool is implemented.
+# Keys: 1–40 letters/digits/_/-. Values: HTTP(S), no credentials, max 512 bytes.
+[shortcuts]
+github = "https://github.com/notifications"
+# email = "https://mail.google.com/mail/u/0"

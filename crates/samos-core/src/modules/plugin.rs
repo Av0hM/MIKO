@@ -22,27 +22,30 @@ impl LoadedPlugin {
     fn new(library: Library) -> Result<Self> {
         // Get all function pointers first (borrowing library)
         let name_ptr = {
-            let name_fn: Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> = 
+            let name_fn: Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> =
                 unsafe { library.get(b"plugin_name")? };
             unsafe { name_fn() }
         };
         let version_ptr = {
-            let version_fn: Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> = 
+            let version_fn: Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> =
                 unsafe { library.get(b"plugin_version")? };
             unsafe { version_fn() }
         };
         let desc_ptr = {
-            let desc_fn: Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> = 
+            let desc_fn: Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> =
                 unsafe { library.get(b"plugin_description")? };
             unsafe { desc_fn() }
         };
-        
+
         let init_result = {
             let init_fn: Symbol<PluginInitFn> = unsafe { library.get(b"plugin_init")? };
             unsafe { init_fn() }
         };
         if init_result != 0 {
-            return Err(anyhow::anyhow!("Plugin init failed with code {}", init_result));
+            return Err(anyhow::anyhow!(
+                "Plugin init failed with code {}",
+                init_result
+            ));
         }
 
         // Now get the function pointers we'll store - extract raw pointers first

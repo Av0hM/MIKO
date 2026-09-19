@@ -43,32 +43,50 @@ fn main() -> Result<()> {
 }
 
 fn toggle_wifi() -> Result<()> {
-    let output = std::process::Command::new("timeout").args(["8s", "nmcli"]).env("LC_ALL", "C")
+    let output = std::process::Command::new("timeout")
+        .args(["8s", "nmcli"])
+        .env("LC_ALL", "C")
         .args(["radio", "wifi"])
         .output()?;
 
-    ensure!(output.status.success(), "Status query failed: {}", String::from_utf8_lossy(&output.stderr));
+    ensure!(
+        output.status.success(),
+        "Status query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let enabled = stdout == "enabled";
     let new_state = !enabled;
 
-    checked("nmcli", &["radio", "wifi", if new_state { "on" } else { "off" }])?;
+    checked(
+        "nmcli",
+        &["radio", "wifi", if new_state { "on" } else { "off" }],
+    )?;
 
     println!("WiFi: {}", if new_state { "enabled" } else { "disabled" });
     Ok(())
 }
 
 fn toggle_bluetooth() -> Result<()> {
-    let output = std::process::Command::new("timeout").args(["8s", "bluetoothctl"]).env("LC_ALL", "C")
+    let output = std::process::Command::new("timeout")
+        .args(["8s", "bluetoothctl"])
+        .env("LC_ALL", "C")
         .args(["show"])
         .output()?;
 
-    ensure!(output.status.success(), "Status query failed: {}", String::from_utf8_lossy(&output.stderr));
+    ensure!(
+        output.status.success(),
+        "Status query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let powered = stdout.lines().any(|l| l.trim().starts_with("Powered: yes"));
     let new_state = !powered;
 
-    checked("bluetoothctl", &["power", if new_state { "on" } else { "off" }])?;
+    checked(
+        "bluetoothctl",
+        &["power", if new_state { "on" } else { "off" }],
+    )?;
 
     println!(
         "Bluetooth: {}",
@@ -78,7 +96,10 @@ fn toggle_bluetooth() -> Result<()> {
 }
 
 fn set_power_profile(profile: &str) -> Result<()> {
-    ensure!(["balanced", "power-saver", "performance"].contains(&profile), "Invalid power profile");
+    ensure!(
+        ["balanced", "power-saver", "performance"].contains(&profile),
+        "Invalid power profile"
+    );
     checked("powerprofilesctl", &["set", profile])?;
 
     println!("Power profile set to: {}", profile);
@@ -124,7 +145,9 @@ fn theme_list() -> Result<()> {
 fn theme_set(theme: &str) -> Result<()> {
     samos_core::config::validate_name(theme)?;
     let home = std::env::var("HOME")?;
-    let theme_path = PathBuf::from(home).join(".config/samos/themes").join(format!("{theme}.toml"));
+    let theme_path = PathBuf::from(home)
+        .join(".config/samos/themes")
+        .join(format!("{theme}.toml"));
     ensure!(theme_path.is_file(), "Theme '{theme}' not found");
     samos_core::config::set_theme_at(&samos_core::config::Config::path()?, theme)?;
     println!("Theme set to: {theme}");
@@ -132,7 +155,15 @@ fn theme_set(theme: &str) -> Result<()> {
 }
 
 fn checked(program: &str, args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new("timeout").args(["8s", program]).args(args).env("LC_ALL", "C").output()?;
-    ensure!(output.status.success(), "{program} failed: {}", String::from_utf8_lossy(&output.stderr));
+    let output = std::process::Command::new("timeout")
+        .args(["8s", program])
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "{program} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }

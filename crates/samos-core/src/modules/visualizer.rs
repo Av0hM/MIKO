@@ -1,81 +1,37 @@
 use anyhow::Result;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::io::{BufRead, BufReader};
 
 use crate::{modules::Module, state::State};
 
 pub struct VisualizerModule {
     spectrum: Arc<Mutex<Vec<u8>>>,
     cava_handle: Option<thread::JoinHandle<()>>,
+    child: Arc<Mutex<Option<Child>>>,
 }
 
 impl VisualizerModule {
     pub fn new() -> Result<Self> {
-        let spectrum = Arc::new(Mutex::new(vec![0u8; 120]));
-        let spectrum_clone = spectrum.clone();
-
-        let handle = thread::spawn(move || {
-            let config_path = format!("{}/.config/cava/cava_samos.conf", std::env::var("HOME").unwrap_or_default());
-            
-            let mut child = match Command::new("cava")
-                .args(["-p", &config_path])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[visualizer] Failed to spawn cava: {}", e);
-                    return;
-                }
-            };
-
-            let stdout = match child.stdout.take() {
-                Some(s) => s,
-                None => {
-                    eprintln!("[visualizer] Failed to capture cava stdout");
-                    return;
-                }
-            };
-
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        let values: Vec<u8> = l.split(';')
-                            .filter_map(|s| s.parse::<u8>().ok())
-                            .collect();
-                        if values.len() == 120 {
-                            *spectrum_clone.lock().unwrap() = values;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
         Ok(Self {
-            spectrum,
-            cava_handle: Some(handle),
+            spectrum: Arc::new(Mutex::new(vec![0; 120])),
+            cava_handle: None,
+            child: Arc::new(Mutex::new(None)),
         })
     }
 
     fn get_now_playing(&self) -> (String, String, String) {
-        let output = Command::new("playerctl")
-            .args(["metadata", "--format", "{{title}}|{{artist}}|{{status}}"])
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let parts: Vec<&str> = stdout.split('|').collect();
-                if parts.len() == 3 {
-                    return (parts[0].to_string(), parts[1].to_string(), parts[2].to_string());
-                }
+        if let Ok(output) = crate::process::run(
+            "playerctl",
+            &["metadata", "--format", "{{title}}|{{artist}}|{{status}}"],
+            None,
+            2,
+        ) {
+            let parts: Vec<_> = output.split('|').collect();
+            if parts.len() == 3 {
+                return (parts[0].into(), parts[1].into(), parts[2].into());
             }
-            _ => {}
         }
         (String::new(), String::new(), "Stopped".to_string())
     }
@@ -87,6 +43,34 @@ impl Module for VisualizerModule {
     }
 
     fn init(&mut self) -> Result<()> {
+        let config = format!("{}/.config/cava/cava_samos.conf", std::env::var("HOME")?);
+        let mut child = Command::new("cava")
+            .args(["-p", &config])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdout = child.stdout.take().expect("piped Cava stdout");
+        *self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Cava unavailable"))? = Some(child);
+        let spectrum = self.spectrum.clone();
+        self.cava_handle = Some(thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                let values: Vec<u8> = line.split(';').filter_map(|v| v.parse().ok()).collect();
+                if values.len() == 120 {
+                    if let Ok(mut data) = spectrum.lock() {
+                        *data = values;
+                    }
+                }
+            }
+            if let Ok(mut data) = spectrum.lock() {
+                data.fill(0);
+            }
+        }));
         Ok(())
     }
 
@@ -103,9 +87,24 @@ impl Module for VisualizerModule {
     }
 
     fn shutdown(&mut self) -> Result<()> {
+        if let Some(mut child) = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Cava unavailable"))?
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(handle) = self.cava_handle.take() {
             let _ = handle.join();
         }
         Ok(())
+    }
+}
+
+impl Drop for VisualizerModule {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }

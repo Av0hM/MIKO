@@ -1,4 +1,4 @@
-(defpoll live :interval "1s" :initial "{\"online\": false, \"theme\": \"hud\", \"cpu\": {\"usage\": 0}, \"memory\": {\"used_percent\": 0}, \"battery\": {\"percent\": 0}, \"temperature\": {\"celsius\": 0}, \"system\": {\"hostname\": \"Connecting\\u2026\", \"kernel\": \"Linux\"}, \"workspace\": {\"workspaces\": []}, \"control\": {\"wifi_enabled\": false, \"wifi_ssid\": \"\", \"bluetooth_enabled\": false, \"power_profile\": \"unknown\"}, \"visualizer\": {\"now_playing_title\": \"\", \"now_playing_artist\": \"\", \"now_playing_status\": \"Stopped\"}}" "/usr/bin/python3 scripts/desktop.py state")
+(defpoll live :interval "1s" :initial "{\"online\": false, \"theme\": \"hud\", \"cpu\": {\"usage\": 0}, \"memory\": {\"used_percent\": 0}, \"battery\": {\"percent\": 0}, \"temperature\": {\"celsius\": 0}, \"system\": {\"hostname\": \"Connecting\\u2026\", \"kernel\": \"Linux\"}, \"workspace\": {\"workspaces\": []}, \"control\": {\"wifi_enabled\": false, \"wifi_ssid\": \"\", \"bluetooth_enabled\": false, \"power_profile\": \"unknown\"}, \"visualizer\": {\"now_playing_title\": \"\", \"now_playing_artist\": \"\", \"now_playing_status\": \"Stopped\"}, \"ai\": {\"model\": \"\", \"status\": \"idle\", \"listening\": false, \"transcribing\": false, \"synthesizing\": false, \"speaking\": false}}" "/usr/bin/python3 scripts/desktop.py state")
 (defpoll clock :interval "1s" :initial "{}" "/usr/bin/python3 scripts/desktop.py clock")
 (defpoll chat :interval "500ms" :initial "{\"user\": \"\", \"reply\": \"Ask about your system, open an app, or save a reminder.\", \"busy\": false, \"pending\": \"\", \"action\": \"\"}" "/usr/bin/python3 scripts/desktop.py chat-state")
 (deflisten spectrum :initial "[]" "/usr/bin/python3 scripts/desktop.py spectrum")
@@ -69,7 +69,7 @@
   (box :class "card miko" :orientation "v" :space-evenly false :spacing 14
     (box :space-evenly false
       (label :class "miko-name" :hexpand true :halign "start" :text "miko")
-      (label :show-truncated false :class "badge" :text {chat.busy ? "THINKING" : "LOCAL ASSISTANT"}))
+      (label :show-truncated false :class "badge" :text {live.ai.listening ? "LISTENING" : live.ai.transcribing ? "TRANSCRIBING" : live.ai.synthesizing ? "PREPARING VOICE" : live.ai.speaking ? "SPEAKING" : chat.busy ? "THINKING" : "LOCAL ASSISTANT"}))
     (label :class "subtle" :halign "start" :wrap true :text "A helping hand, right here.")
     (label :class "user-message" :visible {chat.user != ""} :halign "end" :wrap true :width 290 :show-truncated false :text {chat.user ?: ""})
     (scroll :height 110 :hscroll false :vscroll true

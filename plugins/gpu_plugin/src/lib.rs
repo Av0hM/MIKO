@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::process::Command;
@@ -8,7 +8,17 @@ static INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 fn read_intel_gpu() -> Option<Value> {
     let output = Command::new("sudo")
-        .args(["-n", "intel_gpu_top", "-J", "-s", "100", "-n", "2", "-o", "-"])
+        .args([
+            "-n",
+            "intel_gpu_top",
+            "-J",
+            "-s",
+            "100",
+            "-n",
+            "2",
+            "-o",
+            "-",
+        ])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -23,9 +33,21 @@ fn read_intel_gpu() -> Option<Value> {
 }
 
 fn read_sysfs_intel() -> Option<Value> {
-    let freq_cur = std::fs::read_to_string("/sys/class/drm/card1/gt_cur_freq_mhz").ok()?.trim().parse::<u64>().ok()?;
-    let freq_max = std::fs::read_to_string("/sys/class/drm/card1/gt_max_freq_mhz").ok()?.trim().parse::<u64>().ok()?;
-    let freq_act = std::fs::read_to_string("/sys/class/drm/card1/gt_act_freq_mhz").ok()?.trim().parse::<u64>().ok()?;
+    let freq_cur = std::fs::read_to_string("/sys/class/drm/card1/gt_cur_freq_mhz")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let freq_max = std::fs::read_to_string("/sys/class/drm/card1/gt_max_freq_mhz")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let freq_act = std::fs::read_to_string("/sys/class/drm/card1/gt_act_freq_mhz")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
     Some(json!({
         "vendor": "intel",
         "freq_cur_mhz": freq_cur,
@@ -36,13 +58,22 @@ fn read_sysfs_intel() -> Option<Value> {
 
 fn read_nvidia() -> Option<Value> {
     let temp_out = Command::new("nvidia-smi")
-        .args(["--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
-    let temp: f32 = String::from_utf8_lossy(&temp_out.stdout).trim().parse().ok()?;
+    let temp: f32 = String::from_utf8_lossy(&temp_out.stdout)
+        .trim()
+        .parse()
+        .ok()?;
 
     let mem_out = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     let mem_str = String::from_utf8_lossy(&mem_out.stdout);
@@ -62,7 +93,10 @@ fn read_nvidia() -> Option<Value> {
 }
 
 fn read_amd() -> Option<Value> {
-    let output = Command::new("rocm-smi").args(["--showtemp"]).output().ok()?;
+    let output = Command::new("rocm-smi")
+        .args(["--showtemp"])
+        .output()
+        .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         if line.contains("Temperature") && line.contains("°C") {

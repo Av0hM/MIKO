@@ -14,7 +14,7 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_STATE = {'online': False, 'theme': 'hud', 'cpu': {'usage': 0}, 'memory': {'used_percent': 0}, 'battery': {'percent': 0}, 'temperature': {'celsius': 0}, 'system': {'hostname': 'Connecting…', 'kernel': 'Linux'}, 'workspace': {'workspaces': []}, 'control': {'wifi_enabled': False, 'wifi_ssid': '', 'bluetooth_enabled': False, 'power_profile': 'unknown'}, 'visualizer': {'now_playing_title': '', 'now_playing_artist': '', 'now_playing_status': 'Stopped'}}
+DEFAULT_STATE = {'online': False, 'theme': 'hud', 'cpu': {'usage': 0}, 'memory': {'used_percent': 0}, 'battery': {'percent': 0}, 'temperature': {'celsius': 0}, 'system': {'hostname': 'Connecting…', 'kernel': 'Linux'}, 'workspace': {'workspaces': []}, 'control': {'wifi_enabled': False, 'wifi_ssid': '', 'bluetooth_enabled': False, 'power_profile': 'unknown'}, 'visualizer': {'now_playing_title': '', 'now_playing_artist': '', 'now_playing_status': 'Stopped'}, 'ai': {'model': '', 'status': 'idle', 'listening': False, 'transcribing': False, 'synthesizing': False, 'speaking': False}}
 STATE = Path.home() / '.local/state/samos'
 CHAT = STATE / 'desktop-chat.json'
 BASE = {'user': '', 'reply': 'Ask about your system, open an app, or save a reminder.', 'busy': False,
@@ -160,7 +160,10 @@ def main():
         data = read_json(STATE / 'state.json', {})
         online = bool(data)
         data = DEFAULT_STATE | data
+        data['ai'] = DEFAULT_STATE['ai'] | (data.get('ai') or {})
         data['online'] = online and time.time() - (STATE / 'state.json').stat().st_mtime < 10
+        if not data['online']:
+            data['ai'] = DEFAULT_STATE['ai'].copy()
         emit(data)
     elif action == 'clock':
         now = datetime.datetime.now()

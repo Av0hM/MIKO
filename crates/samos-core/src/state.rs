@@ -67,6 +67,14 @@ pub struct Workspace {
 pub struct AiState {
     pub model: String,
     pub status: String,
+    #[serde(default)]
+    pub listening: bool,
+    #[serde(default)]
+    pub transcribing: bool,
+    #[serde(default)]
+    pub synthesizing: bool,
+    #[serde(default)]
+    pub speaking: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -126,15 +134,29 @@ pub struct RuleCondition {
 pub enum RuleAction {
     #[default]
     Notify,
-    RunCommand { command: String },
-    SetTheme { theme: String },
-    SetPowerProfile { profile: String },
+    RunCommand {
+        command: String,
+    },
+    SetTheme {
+        theme: String,
+    },
+    SetPowerProfile {
+        profile: String,
+    },
     ToggleWifi,
     ToggleBluetooth,
-    SwitchWorkspace { workspace_id: i32 },
-    LaunchApp { app_id: String },
-    Speak { text: String },
-    Log { message: String },
+    SwitchWorkspace {
+        workspace_id: i32,
+    },
+    LaunchApp {
+        app_id: String,
+    },
+    Speak {
+        text: String,
+    },
+    Log {
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
